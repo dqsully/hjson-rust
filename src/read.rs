@@ -13,6 +13,10 @@ use iter::LineColIterator;
 
 use super::error::{Error, ErrorCode, Result};
 
+fn is_whitespace(c: u8) -> bool {
+    c == b' ' || c == b'\t' || c == b'\n' || c == b'\r'
+}
+
 /// Trait used by the deserializer for iterating over input. This is manually
 /// "specialized" for iterating over &[u8]. Once feature(specialization) is
 /// stable we can use actual specialization.
@@ -58,7 +62,21 @@ pub trait Read<'de>: private::Sealed {
     /// string until the next quotation mark using the given scratch space if
     /// necessary. The scratch space is initially empty.
     #[doc(hidden)]
-    fn parse_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'de, 's, str>>;
+    fn parse_double_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'de, 's, str>>;
+
+    /// Assumes the previous byte was an apostrophe. Parses a JSON-escaped
+    /// string until the next quotation mark using the given scratch space if
+    /// necessary. The scratch space is initially empty.
+    #[doc(hidden)]
+    fn parse_single_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'de, 's, str>>;
+
+    /// Parses a string until the next newline
+    #[doc(hidden)]
+    fn parse_none_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'de, 's, str>>;
+
+    /// Parses a no-whitespace member name
+    #[doc(hidden)]
+    fn parse_member_name<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'de, 's, str>>;
 
     /// Assumes the previous byte was a quotation mark. Parses a JSON-escaped
     /// string until the next quotation mark using the given scratch space if
@@ -67,7 +85,39 @@ pub trait Read<'de>: private::Sealed {
     /// This function returns the raw bytes in the string with escape sequences
     /// expanded but without performing unicode validation.
     #[doc(hidden)]
-    fn parse_str_raw<'s>(
+    fn parse_double_str_raw<'s>(
+        &'s mut self,
+        scratch: &'s mut Vec<u8>,
+    ) -> Result<Reference<'de, 's, [u8]>>;
+
+    /// Assumes the previous byte was an apostrophe. Parses a JSON-escaped
+    /// string until the next quotation mark using the given scratch space if
+    /// necessary. The scratch space is initially empty.
+    ///
+    /// This function returns the raw bytes in the string with escape sequences
+    /// expanded but without performing unicode validation.
+    #[doc(hidden)]
+    fn parse_single_str_raw<'s>(
+        &'s mut self,
+        scratch: &'s mut Vec<u8>,
+    ) -> Result<Reference<'de, 's, [u8]>>;
+
+    /// Parses a string until the next newline
+    ///
+    /// This function returns the raw bytes in the string with escape sequences
+    /// expanded but without performing unicode validation.
+    #[doc(hidden)]
+    fn parse_none_str_raw<'s>(
+        &'s mut self,
+        scratch: &'s mut Vec<u8>,
+    ) -> Result<Reference<'de, 's, [u8]>>;
+
+    /// Parses a no-whitespace member name
+    ///
+    /// This function returns the raw bytes in the string with escape sequences
+    /// expanded but without performing unicode validation.
+    #[doc(hidden)]
+    fn parse_member_name_raw<'s>(
         &'s mut self,
         scratch: &'s mut Vec<u8>,
     ) -> Result<Reference<'de, 's, [u8]>>;
@@ -75,7 +125,20 @@ pub trait Read<'de>: private::Sealed {
     /// Assumes the previous byte was a quotation mark. Parses a JSON-escaped
     /// string until the next quotation mark but discards the data.
     #[doc(hidden)]
-    fn ignore_str(&mut self) -> Result<()>;
+    fn ignore_double_str(&mut self) -> Result<()>;
+
+    /// Assumes the previous byte was an apostrophe. Parses a JSON-escaped
+    /// string until the next quotation mark but discards the data.
+    #[doc(hidden)]
+    fn ignore_single_str(&mut self) -> Result<()>;
+
+    /// Parses a string until the next newline
+    #[doc(hidden)]
+    fn ignore_none_str(&mut self) -> Result<()>;
+
+    /// Parses a no-whitespace member name
+    #[doc(hidden)]
+    fn ignore_member_name(&mut self) -> Result<()>;
 }
 
 pub struct Position {
@@ -156,7 +219,7 @@ impl<R> IoRead<R>
 where
     R: io::Read,
 {
-    fn parse_str_bytes<'s, T, F>(
+    fn parse_double_str_bytes<'s, T, F>(
         &'s mut self,
         scratch: &'s mut Vec<u8>,
         validate: bool,
@@ -185,6 +248,77 @@ where
                     }
                     scratch.push(ch);
                 }
+            }
+        }
+    }
+
+    fn parse_single_str_bytes<'s, T, F>(
+        &'s mut self,
+        scratch: &'s mut Vec<u8>,
+        validate: bool,
+        result: F,
+    ) -> Result<T>
+    where
+        T: 's,
+        F: FnOnce(&'s Self, &'s [u8]) -> Result<T>,
+    {
+        loop {
+            let ch = try!(next_or_eof(self));
+            if !ESCAPE[ch as usize] {
+                scratch.push(ch);
+                continue;
+            }
+            match ch {
+                b'\'' => {
+                    return result(self, scratch);
+                }
+                b'\\' => {
+                    try!(parse_escape(self, scratch));
+                }
+                _ => {
+                    if validate {
+                        return error(self, ErrorCode::InvalidUnicodeCodePoint);
+                    }
+                    scratch.push(ch);
+                }
+            }
+        }
+    }
+
+    fn parse_none_str_bytes<'s, T, F>(
+        &'s mut self,
+        scratch: &'s mut Vec<u8>,
+        result: F,
+    ) -> Result<T>
+    where
+        T: 's,
+        F: FnOnce(&'s Self, &'s [u8]) -> Result<T>,
+    {
+        loop {
+            let ch = try!(next_or_eof(self));
+            if ch != b'\n' && ch != b'\r' {
+                scratch.push(ch);
+            } else {
+                return result(self, scratch);
+            }
+        }
+    }
+
+    fn parse_member_name_bytes<'s, T, F>(
+        &'s mut self,
+        scratch: &'s mut Vec<u8>,
+        result: F,
+    ) -> Result<T>
+    where
+        T: 's,
+        F: FnOnce(&'s Self, &'s [u8]) -> Result<T>,
+    {
+        loop {
+            let ch = try!(next_or_eof(self));
+            if !is_whitespace(ch) {
+                scratch.push(ch);
+            } else {
+                return result(self, scratch);
             }
         }
     }
@@ -250,20 +384,59 @@ where
         }
     }
 
-    fn parse_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'de, 's, str>> {
-        self.parse_str_bytes(scratch, true, as_str)
+    fn parse_double_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'de, 's, str>> {
+        self.parse_double_str_bytes(scratch, true, as_str)
             .map(Reference::Copied)
     }
 
-    fn parse_str_raw<'s>(
+    fn parse_single_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'de, 's, str>> {
+        self.parse_single_str_bytes(scratch, true, as_str)
+            .map(Reference::Copied)
+    }
+
+    fn parse_none_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'de, 's, str>> {
+        self.parse_none_str_bytes(scratch, as_str)
+            .map(Reference::Copied)
+    }
+
+    fn parse_member_name<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'de, 's, str>> {
+        self.parse_member_name_bytes(scratch, as_str)
+            .map(Reference::Copied)
+    }
+
+    fn parse_double_str_raw<'s>(
         &'s mut self,
         scratch: &'s mut Vec<u8>,
     ) -> Result<Reference<'de, 's, [u8]>> {
-        self.parse_str_bytes(scratch, false, |_, bytes| Ok(bytes))
+        self.parse_double_str_bytes(scratch, false, |_, bytes| Ok(bytes))
             .map(Reference::Copied)
     }
 
-    fn ignore_str(&mut self) -> Result<()> {
+    fn parse_single_str_raw<'s>(
+        &'s mut self,
+        scratch: &'s mut Vec<u8>,
+    ) -> Result<Reference<'de, 's, [u8]>> {
+        self.parse_single_str_bytes(scratch, false, |_, bytes| Ok(bytes))
+            .map(Reference::Copied)
+    }
+
+    fn parse_none_str_raw<'s>(
+        &'s mut self,
+        scratch: &'s mut Vec<u8>,
+    ) -> Result<Reference<'de, 's, [u8]>> {
+        self.parse_none_str_bytes(scratch, |_, bytes| Ok(bytes))
+            .map(Reference::Copied)
+    }
+
+    fn parse_member_name_raw<'s>(
+        &'s mut self,
+        scratch: &'s mut Vec<u8>,
+    ) -> Result<Reference<'de, 's, [u8]>> {
+        self.parse_member_name_bytes(scratch, |_, bytes| Ok(bytes))
+            .map(Reference::Copied)
+    }
+
+    fn ignore_double_str(&mut self) -> Result<()> {
         loop {
             let ch = try!(next_or_eof(self));
             if !ESCAPE[ch as usize] {
@@ -281,6 +454,48 @@ where
                 }
             }
         }
+    }
+
+    fn ignore_single_str(&mut self) -> Result<()> {
+        loop {
+            let ch = try!(next_or_eof(self));
+            if !ESCAPE[ch as usize] {
+                continue;
+            }
+            match ch {
+                b'\'' => {
+                    return Ok(());
+                }
+                b'\\' => {
+                    try!(ignore_escape(self));
+                }
+                _ => {
+                    return error(self, ErrorCode::InvalidUnicodeCodePoint);
+                }
+            }
+        }
+    }
+
+    fn ignore_none_str(&mut self) -> Result<()> {
+        loop {
+            let ch = try!(next_or_eof(self));
+            if is_whitespace(ch) {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn ignore_member_name(&mut self) -> Result<()> {
+        loop {
+            let ch = try!(next_or_eof(self));
+            if ch == b'\n' || ch == b'\r' {
+                break;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -314,7 +529,7 @@ impl<'a> SliceRead<'a> {
     /// The big optimization here over IoRead is that if the string contains no
     /// backslash escape sequences, the returned &str is a slice of the raw JSON
     /// data so we avoid copying into the scratch space.
-    fn parse_str_bytes<'s, T: ?Sized, F>(
+    fn parse_double_str_bytes<'s, T: ?Sized, F>(
         &'s mut self,
         scratch: &'s mut Vec<u8>,
         validate: bool,
@@ -363,6 +578,123 @@ impl<'a> SliceRead<'a> {
                     self.index += 1;
                 }
             }
+        }
+    }
+
+    /// The big optimization here over IoRead is that if the string contains no
+    /// backslash escape sequences, the returned &str is a slice of the raw JSON
+    /// data so we avoid copying into the scratch space.
+    fn parse_single_str_bytes<'s, T: ?Sized, F>(
+        &'s mut self,
+        scratch: &'s mut Vec<u8>,
+        validate: bool,
+        result: F,
+    ) -> Result<Reference<'a, 's, T>>
+    where
+        T: 's,
+        F: for<'f> FnOnce(&'s Self, &'f [u8]) -> Result<&'f T>,
+    {
+        // Index of the first byte not yet copied into the scratch space.
+        let mut start = self.index;
+
+        loop {
+            while self.index < self.slice.len() && !ESCAPE[self.slice[self.index] as usize] {
+                self.index += 1;
+            }
+            if self.index == self.slice.len() {
+                return error(self, ErrorCode::EofWhileParsingString);
+            }
+            match self.slice[self.index] {
+                b'\'' => {
+                    if scratch.is_empty() {
+                        // Fast path: return a slice of the raw JSON without any
+                        // copying.
+                        let borrowed = &self.slice[start..self.index];
+                        self.index += 1;
+                        return result(self, borrowed).map(Reference::Borrowed);
+                    } else {
+                        scratch.extend_from_slice(&self.slice[start..self.index]);
+                        // "as &[u8]" is required for rustc 1.8.0
+                        let copied = scratch as &[u8];
+                        self.index += 1;
+                        return result(self, copied).map(Reference::Copied);
+                    }
+                }
+                b'\\' => {
+                    scratch.extend_from_slice(&self.slice[start..self.index]);
+                    self.index += 1;
+                    try!(parse_escape(self, scratch));
+                    start = self.index;
+                }
+                _ => {
+                    if validate {
+                        return error(self, ErrorCode::InvalidUnicodeCodePoint);
+                    }
+                    self.index += 1;
+                }
+            }
+        }
+    }
+
+    /// The big optimization here over IoRead is that if the string contains no
+    /// backslash escape sequences, the returned &str is a slice of the raw JSON
+    /// data so we avoid copying into the scratch space.
+    fn parse_none_str_bytes<'s, T: ?Sized, F>(
+        &'s mut self,
+        result: F,
+    ) -> Result<Reference<'a, 's, T>>
+    where
+        T: 's,
+        F: for<'f> FnOnce(&'s Self, &'f [u8]) -> Result<&'f T>,
+    {
+        // Index of the first byte not yet copied into the scratch space.
+        let start = self.index;
+
+        while
+            self.index < self.slice.len() &&
+            self.slice[self.index] != b'\n' &&
+            self.slice[self.index] != b'\r'
+        {
+            self.index += 1;
+        }
+        if self.index == self.slice.len() {
+            return error(self, ErrorCode::EofWhileParsingString);
+        }
+
+        // Fast path: return a slice of the raw JSON without any
+        // copying.
+        let borrowed = &self.slice[start..self.index];
+        self.index += 1;
+        return result(self, borrowed).map(Reference::Borrowed);
+    }
+
+    /// The big optimization here over IoRead is that if the string contains no
+    /// backslash escape sequences, the returned &str is a slice of the raw JSON
+    /// data so we avoid copying into the scratch space.
+    fn parse_member_name_bytes<'s, T: ?Sized, F>(
+        &'s mut self,
+        result: F,
+    ) -> Result<Reference<'a, 's, T>>
+    where
+        T: 's,
+        F: for<'f> FnOnce(&'s Self, &'f [u8]) -> Result<&'f T>,
+    {
+        // Index of the first byte not yet copied into the scratch space.
+        let start = self.index;
+
+        loop {
+            while self.index < self.slice.len() && !is_whitespace(self.slice[self.index]) {
+                self.index += 1;
+            }
+            if self.index == self.slice.len() {
+                return error(self, ErrorCode::EofWhileParsingString);
+            }
+
+            // Fast path: return a slice of the raw JSON without any
+            // copying.
+            let borrowed = &self.slice[start..self.index];
+            self.index += 1;
+            return result(self, borrowed).map(Reference::Borrowed);
         }
     }
 }
@@ -417,18 +749,51 @@ impl<'a> Read<'a> for SliceRead<'a> {
         self.index
     }
 
-    fn parse_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'a, 's, str>> {
-        self.parse_str_bytes(scratch, true, as_str)
+    fn parse_double_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'a, 's, str>> {
+        self.parse_double_str_bytes(scratch, true, as_str)
     }
 
-    fn parse_str_raw<'s>(
+    fn parse_single_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'a, 's, str>> {
+        self.parse_single_str_bytes(scratch, true, as_str)
+    }
+
+    fn parse_none_str<'s>(&'s mut self, _: &'s mut Vec<u8>) -> Result<Reference<'a, 's, str>> {
+        self.parse_none_str_bytes(as_str)
+    }
+
+    fn parse_member_name<'s>(&'s mut self, _: &'s mut Vec<u8>) -> Result<Reference<'a, 's, str>> {
+        self.parse_member_name_bytes(as_str)
+    }
+
+    fn parse_double_str_raw<'s>(
         &'s mut self,
         scratch: &'s mut Vec<u8>,
     ) -> Result<Reference<'a, 's, [u8]>> {
-        self.parse_str_bytes(scratch, false, |_, bytes| Ok(bytes))
+        self.parse_double_str_bytes(scratch, false, |_, bytes| Ok(bytes))
     }
 
-    fn ignore_str(&mut self) -> Result<()> {
+    fn parse_single_str_raw<'s>(
+        &'s mut self,
+        scratch: &'s mut Vec<u8>,
+    ) -> Result<Reference<'a, 's, [u8]>> {
+        self.parse_single_str_bytes(scratch, false, |_, bytes| Ok(bytes))
+    }
+
+    fn parse_none_str_raw<'s>(
+        &'s mut self,
+        _: &'s mut Vec<u8>,
+    ) -> Result<Reference<'a, 's, [u8]>> {
+        self.parse_none_str_bytes(|_, bytes| Ok(bytes))
+    }
+
+    fn parse_member_name_raw<'s>(
+        &'s mut self,
+        _: &'s mut Vec<u8>,
+    ) -> Result<Reference<'a, 's, [u8]>> {
+        self.parse_member_name_bytes(|_, bytes| Ok(bytes))
+    }
+
+    fn ignore_double_str(&mut self) -> Result<()> {
         loop {
             while self.index < self.slice.len() && !ESCAPE[self.slice[self.index] as usize] {
                 self.index += 1;
@@ -450,6 +815,56 @@ impl<'a> Read<'a> for SliceRead<'a> {
                 }
             }
         }
+    }
+
+    fn ignore_single_str(&mut self) -> Result<()> {
+        loop {
+            while self.index < self.slice.len() && !ESCAPE[self.slice[self.index] as usize] {
+                self.index += 1;
+            }
+            if self.index == self.slice.len() {
+                return error(self, ErrorCode::EofWhileParsingString);
+            }
+            match self.slice[self.index] {
+                b'\'' => {
+                    self.index += 1;
+                    return Ok(());
+                }
+                b'\\' => {
+                    self.index += 1;
+                    try!(ignore_escape(self));
+                }
+                _ => {
+                    return error(self, ErrorCode::InvalidUnicodeCodePoint);
+                }
+            }
+        }
+    }
+
+    fn ignore_none_str(&mut self) -> Result<()> {
+        while
+            self.index < self.slice.len() &&
+            self.slice[self.index] != b'\n' &&
+            self.slice[self.index] != b'\r'
+        {
+            self.index += 1;
+        }
+        if self.index == self.slice.len() {
+            return error(self, ErrorCode::EofWhileParsingString);
+        }
+
+        Ok(())
+    }
+
+    fn ignore_member_name(&mut self) -> Result<()> {
+        while self.index < self.slice.len() && !is_whitespace(self.slice[self.index]) {
+            self.index += 1;
+        }
+        if self.index == self.slice.len() {
+            return error(self, ErrorCode::EofWhileParsingString);
+        }
+
+        Ok(())
     }
 }
 
@@ -492,9 +907,9 @@ impl<'a> Read<'a> for StrRead<'a> {
         self.delegate.byte_offset()
     }
 
-    fn parse_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'a, 's, str>> {
+    fn parse_double_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'a, 's, str>> {
         self.delegate
-            .parse_str_bytes(
+            .parse_double_str_bytes(
                 scratch, true, |_, bytes| {
                     // The input is assumed to be valid UTF-8 and the \u-escapes are
                     // checked along the way, so don't need to check here.
@@ -503,15 +918,81 @@ impl<'a> Read<'a> for StrRead<'a> {
             )
     }
 
-    fn parse_str_raw<'s>(
+    fn parse_single_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'a, 's, str>> {
+        self.delegate
+            .parse_single_str_bytes(
+                scratch, true, |_, bytes| {
+                    // The input is assumed to be valid UTF-8 and the \u-escapes are
+                    // checked along the way, so don't need to check here.
+                    Ok(unsafe { str::from_utf8_unchecked(bytes) })
+                }
+            )
+    }
+
+    fn parse_none_str<'s>(&'s mut self, _: &'s mut Vec<u8>) -> Result<Reference<'a, 's, str>> {
+        self.delegate
+            .parse_none_str_bytes(
+                |_, bytes| {
+                    // The input is assumed to be valid UTF-8 and the \u-escapes are
+                    // checked along the way, so don't need to check here.
+                    Ok(unsafe { str::from_utf8_unchecked(bytes) })
+                }
+            )
+    }
+
+    fn parse_member_name<'s>(&'s mut self, _: &'s mut Vec<u8>) -> Result<Reference<'a, 's, str>> {
+        self.delegate
+            .parse_member_name_bytes(
+                |_, bytes| {
+                    // The input is assumed to be valid UTF-8 and the \u-escapes are
+                    // checked along the way, so don't need to check here.
+                    Ok(unsafe { str::from_utf8_unchecked(bytes) })
+                }
+            )
+    }
+
+    fn parse_double_str_raw<'s>(
         &'s mut self,
         scratch: &'s mut Vec<u8>,
     ) -> Result<Reference<'a, 's, [u8]>> {
-        self.delegate.parse_str_raw(scratch)
+        self.delegate.parse_double_str_raw(scratch)
     }
 
-    fn ignore_str(&mut self) -> Result<()> {
-        self.delegate.ignore_str()
+    fn parse_single_str_raw<'s>(
+        &'s mut self,
+        scratch: &'s mut Vec<u8>,
+    ) -> Result<Reference<'a, 's, [u8]>> {
+        self.delegate.parse_single_str_raw(scratch)
+    }
+
+    fn parse_none_str_raw<'s>(
+        &'s mut self,
+        scratch: &'s mut Vec<u8>,
+    ) -> Result<Reference<'a, 's, [u8]>> {
+        self.delegate.parse_none_str_raw(scratch)
+    }
+
+    fn parse_member_name_raw<'s>(
+        &'s mut self,
+        scratch: &'s mut Vec<u8>,
+    ) -> Result<Reference<'a, 's, [u8]>> {
+        self.delegate.parse_member_name_raw(scratch)
+    }
+
+    fn ignore_double_str(&mut self) -> Result<()> {
+        self.delegate.ignore_double_str()
+    }
+
+    fn ignore_single_str(&mut self) -> Result<()> {
+        self.delegate.ignore_single_str()
+    }
+
+    fn ignore_none_str(&mut self) -> Result<()> {
+        self.delegate.ignore_none_str()
+    }
+
+    fn ignore_member_name(&mut self) -> Result<()> {
+        self.delegate.ignore_member_name()
     }
 }
 

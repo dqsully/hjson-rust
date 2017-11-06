@@ -161,14 +161,116 @@ impl<'de, R: Read<'de>> Deserializer<R> {
     /// Returns the first non-whitespace byte without consuming it, or `None` if
     /// EOF is encountered.
     fn parse_whitespace(&mut self) -> Result<Option<u8>> {
+        let mut line_comment = false;
+        let mut multiline_comment = false;
+
         loop {
-            match try!(self.peek()) {
-                Some(b' ') | Some(b'\n') | Some(b'\t') | Some(b'\r') => {
-                    self.eat_char();
+            if line_comment {
+                match try!(self.peek()) {
+                    Some(b'\n') | Some(b'\r') => {
+                        line_comment = false;
+                    }
+                    Some(_) => {}
+                    None => {
+                        return Ok(None);
+                    }
                 }
-                other => {
-                    return Ok(other);
+
+                self.eat_char();
+            } else if multiline_comment {
+                match try!(self.peek()) {
+                    Some(b'*') => {
+                        if let Some(b'/') = try!(self.peek()) {
+                                multiline_comment = false;
+                                self.eat_char();
+                        }
+                    }
+                    Some(_) => {}
+                    None => {
+                        return Ok(None);
+                    }
                 }
+
+                self.eat_char();
+            } else {
+                match try!(self.peek()) {
+                    Some(b' ') | Some(b'\n') | Some(b'\t') | Some(b'\r') => {}
+                    Some(b'#') => {
+                        line_comment = true;
+                    }
+                    Some(b'/') => {
+                        match try!(self.peek()) {
+                            Some(b'/') => {
+                                line_comment = true;
+                            }
+                            Some(b'*') => {
+                                multiline_comment = true;
+                            }
+                            other => {
+                                return Ok(other);
+                            }
+                        }
+
+                        self.eat_char();
+                    }
+                    other => {
+                        return Ok(other);
+                    }
+                }
+
+                self.eat_char();
+            }
+        }
+    }
+
+    /// Returns the first non-whitespace byte without consuming it, or `None` if
+    /// EOF is encountered
+    /// Also returns whether the parsing traversed a newline character through a
+    /// reference parameter
+    fn parse_whitespace_get_newline(&mut self, had_newline: &mut bool) -> Result<Option<u8>> {
+        let mut line_comment = false;
+        let mut multiline_comment = false;
+
+        loop {
+            if line_comment {
+                match try!(self.peek()) {
+                    Some(b'\n') | Some(b'\r') => {
+                        line_comment = false;
+                    }
+                    Some(_) => {}
+                    None => {
+                        return Ok(None);
+                    }
+                }
+
+                self.eat_char();
+            } else if multiline_comment {
+                match try!(self.peek()) {
+                    Some(b'*') => {
+                        if let Some(b'/') = try!(self.peek()) {
+                                multiline_comment = false;
+                                self.eat_char();
+                        }
+                    }
+                    Some(_) => {}
+                    None => {
+                        return Ok(None);
+                    }
+                }
+
+                self.eat_char();
+            } else {
+                match try!(self.peek()) {
+                    Some(b'\n') | Some(b'\r') => {
+                        *had_newline = true;
+                    }
+                    Some(b' ') | Some(b'\t') => {}
+                    other => {
+                        return Ok(other);
+                    }
+                }
+
+                self.eat_char();
             }
         }
     }
@@ -208,7 +310,15 @@ impl<'de, R: Read<'de>> Deserializer<R> {
             b'"' => {
                 self.eat_char();
                 self.str_buf.clear();
-                match try!(self.read.parse_str(&mut self.str_buf)) {
+                match try!(self.read.parse_double_str(&mut self.str_buf)) {
+                    Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
+                    Reference::Copied(s) => visitor.visit_str(s),
+                }
+            }
+            b'\'' => {
+                self.eat_char();
+                self.str_buf.clear();
+                match try!(self.read.parse_single_str(&mut self.str_buf)) {
                     Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
                     Reference::Copied(s) => visitor.visit_str(s),
                 }
@@ -245,7 +355,13 @@ impl<'de, R: Read<'de>> Deserializer<R> {
                     (Err(err), _) | (_, Err(err)) => Err(err),
                 }
             }
-            _ => Err(self.peek_error(ErrorCode::ExpectedSomeValue)),
+            _ => {
+                self.str_buf.clear();
+                match try!(self.read.parse_none_str(&mut self.str_buf)) {
+                    Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
+                    Reference::Copied(s) => visitor.visit_str(s),
+                }
+            }
         };
 
         match value {
@@ -520,8 +636,8 @@ impl<'de, R: Read<'de>> Deserializer<R> {
             Some(b',') => {
                 self.eat_char();
                 match self.parse_whitespace() {
-                    Ok(Some(b']')) => Err(self.peek_error(ErrorCode::TrailingComma)),
-                    _ => Err(self.peek_error(ErrorCode::TrailingCharacters)),
+                    Ok(Some(b']')) => Err(self.peek_error(ErrorCode::ExtraComma)),
+                    _ => Err(self.peek_error(ErrorCode::TrailingCharacters)), // This shouldn't be possible
                 }
             }
             Some(_) => Err(self.peek_error(ErrorCode::TrailingCharacters)),
@@ -535,7 +651,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
                 self.eat_char();
                 Ok(())
             }
-            Some(b',') => Err(self.peek_error(ErrorCode::TrailingComma)),
+            Some(b',') => Err(self.peek_error(ErrorCode::ExtraComma)),
             Some(_) => Err(self.peek_error(ErrorCode::TrailingCharacters)),
             None => Err(self.peek_error(ErrorCode::EofWhileParsingObject)),
         }
@@ -571,7 +687,11 @@ impl<'de, R: Read<'de>> Deserializer<R> {
             }
             b'"' => {
                 self.eat_char();
-                self.read.ignore_str()
+                self.read.ignore_double_str()
+            }
+            b'\'' => {
+                self.eat_char();
+                self.read.ignore_single_str()
             }
             b'[' => {
                 self.remaining_depth -= 1;
@@ -596,7 +716,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
                 res
             }
             _ => {
-                Err(self.peek_error(ErrorCode::ExpectedSomeValue))
+                self.read.ignore_none_str()
             }
         }
     }
@@ -669,7 +789,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
     }
 
     fn ignore_seq(&mut self) -> Result<()> {
-        let mut first = true;
+        let mut had_newline;
 
         loop {
             match try!(self.parse_whitespace()) {
@@ -677,13 +797,20 @@ impl<'de, R: Read<'de>> Deserializer<R> {
                     self.eat_char();
                     return Ok(());
                 }
-                Some(b',') if !first => {
-                    self.eat_char();
+                Some(b',') => {
+                    return Err(self.peek_error(ErrorCode::ExtraComma));
                 }
-                Some(_) => {
-                    if first {
-                        first = false;
-                    } else {
+                _ => (),
+            }
+
+            try!(self.ignore_value());
+
+            had_newline = false;
+            match try!(self.parse_whitespace_get_newline(&mut had_newline)) {
+                Some(ch) => {
+                    if ch == b',' {
+                        self.eat_char();
+                    } else if ch != b']' && !had_newline {
                         return Err(self.peek_error(ErrorCode::ExpectedListCommaOrEnd));
                     }
                 }
@@ -691,44 +818,35 @@ impl<'de, R: Read<'de>> Deserializer<R> {
                     return Err(self.peek_error(ErrorCode::EofWhileParsingList));
                 }
             }
-
-            try!(self.ignore_value());
         }
     }
 
     fn ignore_map(&mut self) -> Result<()> {
-        let mut first = true;
+        let mut had_newline;
 
         loop {
-            let peek = match try!(self.parse_whitespace()) {
+            match try!(self.parse_whitespace()) {
                 Some(b'}') => {
                     self.eat_char();
                     return Ok(());
                 }
-                Some(b',') if !first => {
-                    self.eat_char();
-                    try!(self.parse_whitespace())
+                Some(b',') => {
+                    return Err(self.peek_error(ErrorCode::ExtraComma));
                 }
-                Some(b) => {
-                    if first {
-                        first = false;
-                        Some(b)
-                    } else {
-                        return Err(self.peek_error(ErrorCode::ExpectedObjectCommaOrEnd));
-                    }
-                }
-                None => {
-                    return Err(self.peek_error(ErrorCode::EofWhileParsingObject));
-                }
-            };
+                _ => (),
+            }
 
-            match peek {
+            match try!(self.parse_whitespace()) {
                 Some(b'"') => {
                     self.eat_char();
-                    try!(self.read.ignore_str());
+                    try!(self.read.ignore_double_str());
+                }
+                Some(b'\'') => {
+                    self.eat_char();
+                    try!(self.read.ignore_single_str());
                 }
                 Some(_) => {
-                    return Err(self.peek_error(ErrorCode::KeyMustBeAString));
+                    try!(self.read.ignore_member_name());
                 }
                 None => {
                     return Err(self.peek_error(ErrorCode::EofWhileParsingObject));
@@ -738,13 +856,28 @@ impl<'de, R: Read<'de>> Deserializer<R> {
             match try!(self.parse_whitespace()) {
                 Some(b':') => {
                     self.eat_char();
-                    try!(self.ignore_value());
                 }
                 Some(_) => {
                     return Err(self.peek_error(ErrorCode::ExpectedColon));
                 }
                 None => {
                     return Err(self.peek_error(ErrorCode::EofWhileParsingObject));
+                }
+            }
+
+            try!(self.ignore_value());
+
+            had_newline = false;
+            match try!(self.parse_whitespace_get_newline(&mut had_newline)) {
+                Some(ch) => {
+                    if ch == b',' {
+                        self.eat_char();
+                    } else if ch != b'}' && !had_newline {
+                        return Err(self.peek_error(ErrorCode::ExpectedListCommaOrEnd));
+                    }
+                }
+                None => {
+                    return Err(self.peek_error(ErrorCode::EofWhileParsingList));
                 }
             }
         }
@@ -949,7 +1082,15 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
             Some(b'"') => {
                 self.eat_char();
                 self.str_buf.clear();
-                match try!(self.read.parse_str_raw(&mut self.str_buf)) {
+                match try!(self.read.parse_double_str_raw(&mut self.str_buf)) {
+                    Reference::Borrowed(b) => visitor.visit_borrowed_bytes(b),
+                    Reference::Copied(b) => visitor.visit_bytes(b),
+                }
+            }
+            Some(b'\'') => {
+                self.eat_char();
+                self.str_buf.clear();
+                match try!(self.read.parse_single_str_raw(&mut self.str_buf)) {
                     Reference::Borrowed(b) => visitor.visit_borrowed_bytes(b),
                     Reference::Copied(b) => visitor.visit_bytes(b),
                 }
@@ -983,14 +1124,12 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
 
 struct SeqAccess<'a, R: 'a> {
     de: &'a mut Deserializer<R>,
-    first: bool,
 }
 
 impl<'a, R: 'a> SeqAccess<'a, R> {
     fn new(de: &'a mut Deserializer<R>) -> Self {
         SeqAccess {
             de: de,
-            first: true,
         }
     }
 }
@@ -1002,45 +1141,46 @@ impl<'de, 'a, R: Read<'de> + 'a> de::SeqAccess<'de> for SeqAccess<'a, R> {
     where
         T: de::DeserializeSeed<'de>,
     {
-        let peek = match try!(self.de.parse_whitespace()) {
+
+        match try!(self.de.parse_whitespace()) {
             Some(b']') => {
+                self.de.eat_char();
                 return Ok(None);
             }
-            Some(b',') if !self.first => {
-                self.de.eat_char();
-                try!(self.de.parse_whitespace())
+            Some(b',') => {
+                return Err(self.de.peek_error(ErrorCode::ExtraComma));
             }
-            Some(b) => {
-                if self.first {
-                    self.first = false;
-                    Some(b)
-                } else {
+            _ => (),
+        }
+
+        let ret = seed.deserialize(&mut *self.de).map(Some);
+
+        let mut had_newline = false;
+        match try!(self.de.parse_whitespace_get_newline(&mut had_newline)) {
+            Some(ch) => {
+                if ch == b',' {
+                    self.de.eat_char();
+                } else if ch != b']' && !had_newline {
                     return Err(self.de.peek_error(ErrorCode::ExpectedListCommaOrEnd));
                 }
             }
             None => {
                 return Err(self.de.peek_error(ErrorCode::EofWhileParsingList));
             }
-        };
-
-        match peek {
-            Some(b']') => Err(self.de.peek_error(ErrorCode::TrailingComma)),
-            Some(_) => Ok(Some(try!(seed.deserialize(&mut *self.de)))),
-            None => Err(self.de.peek_error(ErrorCode::EofWhileParsingValue)),
         }
+
+        ret
     }
 }
 
 struct MapAccess<'a, R: 'a> {
     de: &'a mut Deserializer<R>,
-    first: bool,
 }
 
 impl<'a, R: 'a> MapAccess<'a, R> {
     fn new(de: &'a mut Deserializer<R>) -> Self {
         MapAccess {
             de: de,
-            first: true,
         }
     }
 }
@@ -1052,32 +1192,24 @@ impl<'de, 'a, R: Read<'de> + 'a> de::MapAccess<'de> for MapAccess<'a, R> {
     where
         K: de::DeserializeSeed<'de>,
     {
-        let peek = match try!(self.de.parse_whitespace()) {
+        match try!(self.de.parse_whitespace()) {
             Some(b'}') => {
+                self.de.eat_char();
                 return Ok(None);
             }
-            Some(b',') if !self.first => {
-                self.de.eat_char();
-                try!(self.de.parse_whitespace())
+            Some(b',') => {
+                return Err(self.de.peek_error(ErrorCode::ExtraComma));
             }
-            Some(b) => {
-                if self.first {
-                    self.first = false;
-                    Some(b)
-                } else {
-                    return Err(self.de.peek_error(ErrorCode::ExpectedObjectCommaOrEnd));
-                }
+            _ => (),
+        }
+
+        match try!(self.de.parse_whitespace()) {
+            Some(_) => {
+                seed.deserialize(MapKey { de: &mut *self.de }).map(Some)
             }
             None => {
-                return Err(self.de.peek_error(ErrorCode::EofWhileParsingObject));
+                Err(self.de.peek_error(ErrorCode::EofWhileParsingObject))
             }
-        };
-
-        match peek {
-            Some(b'"') => seed.deserialize(MapKey { de: &mut *self.de }).map(Some),
-            Some(b'}') => Err(self.de.peek_error(ErrorCode::TrailingComma)),
-            Some(_) => Err(self.de.peek_error(ErrorCode::KeyMustBeAString)),
-            None => Err(self.de.peek_error(ErrorCode::EofWhileParsingValue)),
         }
     }
 
@@ -1087,7 +1219,23 @@ impl<'de, 'a, R: Read<'de> + 'a> de::MapAccess<'de> for MapAccess<'a, R> {
     {
         try!(self.de.parse_object_colon());
 
-        seed.deserialize(&mut *self.de)
+        let ret = seed.deserialize(&mut *self.de);
+
+        let mut had_newline = false;
+        match try!(self.de.parse_whitespace_get_newline(&mut had_newline)) {
+            Some(ch) => {
+                if ch == b',' {
+                    self.de.eat_char();
+                } else if ch != b'}' && !had_newline {
+                    return Err(self.de.peek_error(ErrorCode::ExpectedListCommaOrEnd));
+                }
+            }
+            None => {
+                return Err(self.de.peek_error(ErrorCode::EofWhileParsingList));
+            }
+        }
+
+        ret
     }
 }
 
@@ -1208,9 +1356,27 @@ macro_rules! deserialize_integer_key {
         where
             V: de::Visitor<'de>,
         {
-            self.de.eat_char();
-            self.de.str_buf.clear();
-            let string = try!(self.de.read.parse_str(&mut self.de.str_buf));
+            let string;
+            match try!(self.de.peek()) {
+                Some(b'"') => {
+                    self.de.eat_char();
+                    self.de.str_buf.clear();
+                    string = try!(self.de.read.parse_double_str(&mut self.de.str_buf))
+                }
+                Some(b'\'') => {
+                    self.de.eat_char();
+                    self.de.str_buf.clear();
+                    string = try!(self.de.read.parse_single_str(&mut self.de.str_buf))
+                }
+                Some(_) => {
+                    self.de.str_buf.clear();
+                    string = try!(self.de.read.parse_none_str(&mut self.de.str_buf));
+                }
+                None => {
+                    return Err(self.de.peek_error(ErrorCode::EofWhileParsingObject));
+                }
+            }
+
             match (string.parse(), string) {
                 (Ok(integer), _) => visitor.$visit(integer),
                 (Err(_), Reference::Borrowed(s)) => visitor.visit_borrowed_str(s),
