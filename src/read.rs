@@ -229,6 +229,7 @@ where
         T: 's,
         F: FnOnce(&'s Self, &'s [u8]) -> Result<T>,
     {
+        debug!(parse_double_str_bytes);
         loop {
             let ch = try!(next_or_eof(self));
             if !ESCAPE[ch as usize] {
@@ -262,6 +263,7 @@ where
         T: 's,
         F: FnOnce(&'s Self, &'s [u8]) -> Result<T>,
     {
+        debug!(parse_single_str_bytes);
         loop {
             let ch = try!(next_or_eof(self));
             if !ESCAPE[ch as usize] {
@@ -294,6 +296,7 @@ where
         T: 's,
         F: FnOnce(&'s Self, &'s [u8]) -> Result<T>,
     {
+        debug!(parse_none_str_bytes);
         loop {
             let ch = try!(next_or_eof(self));
             if ch != b'\n' && ch != b'\r' {
@@ -313,6 +316,7 @@ where
         T: 's,
         F: FnOnce(&'s Self, &'s [u8]) -> Result<T>,
     {
+        debug!(parse_member_name_bytes);
         loop {
             let ch = try!(next_or_eof(self));
             if !is_whitespace(ch) {
@@ -437,6 +441,7 @@ where
     }
 
     fn ignore_double_str(&mut self) -> Result<()> {
+        debug!(ignore_double_str);
         loop {
             let ch = try!(next_or_eof(self));
             if !ESCAPE[ch as usize] {
@@ -457,6 +462,7 @@ where
     }
 
     fn ignore_single_str(&mut self) -> Result<()> {
+        debug!(ignore_single_str);
         loop {
             let ch = try!(next_or_eof(self));
             if !ESCAPE[ch as usize] {
@@ -477,6 +483,7 @@ where
     }
 
     fn ignore_none_str(&mut self) -> Result<()> {
+        debug!(ignore_none_str);
         loop {
             let ch = try!(next_or_eof(self));
             if is_whitespace(ch) {
@@ -488,6 +495,7 @@ where
     }
 
     fn ignore_member_name(&mut self) -> Result<()> {
+        debug!(ignore_member_name);
         loop {
             let ch = try!(next_or_eof(self));
             if ch == b'\n' || ch == b'\r' {
@@ -539,6 +547,7 @@ impl<'a> SliceRead<'a> {
         T: 's,
         F: for<'f> FnOnce(&'s Self, &'f [u8]) -> Result<&'f T>,
     {
+        debug!(parse_double_str_bytes);
         // Index of the first byte not yet copied into the scratch space.
         let mut start = self.index;
 
@@ -594,6 +603,7 @@ impl<'a> SliceRead<'a> {
         T: 's,
         F: for<'f> FnOnce(&'s Self, &'f [u8]) -> Result<&'f T>,
     {
+        debug!(parse_single_str_bytes);
         // Index of the first byte not yet copied into the scratch space.
         let mut start = self.index;
 
@@ -647,6 +657,7 @@ impl<'a> SliceRead<'a> {
         T: 's,
         F: for<'f> FnOnce(&'s Self, &'f [u8]) -> Result<&'f T>,
     {
+        debug!(parse_none_str_bytes);
         // Index of the first byte not yet copied into the scratch space.
         let start = self.index;
 
@@ -679,6 +690,7 @@ impl<'a> SliceRead<'a> {
         T: 's,
         F: for<'f> FnOnce(&'s Self, &'f [u8]) -> Result<&'f T>,
     {
+        debug!(parse_member_name_bytes);
         // Index of the first byte not yet copied into the scratch space.
         let start = self.index;
 
@@ -794,6 +806,7 @@ impl<'a> Read<'a> for SliceRead<'a> {
     }
 
     fn ignore_double_str(&mut self) -> Result<()> {
+        debug!(ignore_double_str);
         loop {
             while self.index < self.slice.len() && !ESCAPE[self.slice[self.index] as usize] {
                 self.index += 1;
@@ -818,6 +831,7 @@ impl<'a> Read<'a> for SliceRead<'a> {
     }
 
     fn ignore_single_str(&mut self) -> Result<()> {
+        debug!(ignore_single_str);
         loop {
             while self.index < self.slice.len() && !ESCAPE[self.slice[self.index] as usize] {
                 self.index += 1;
@@ -842,6 +856,7 @@ impl<'a> Read<'a> for SliceRead<'a> {
     }
 
     fn ignore_none_str(&mut self) -> Result<()> {
+        debug!(ignore_none_str);
         while
             self.index < self.slice.len() &&
             self.slice[self.index] != b'\n' &&
@@ -1045,6 +1060,7 @@ fn as_str<'de, 's, R: Read<'de>>(read: &R, slice: &'s [u8]) -> Result<&'s str> {
 /// Parses a JSON escape sequence and appends it into the scratch space. Assumes
 /// the previous byte read was a backslash.
 fn parse_escape<'de, R: Read<'de>>(read: &mut R, scratch: &mut Vec<u8>) -> Result<()> {
+    debug!(parse_escape);
     let ch = try!(next_or_eof(read));
 
     match ch {
@@ -1115,6 +1131,7 @@ fn parse_escape<'de, R: Read<'de>>(read: &mut R, scratch: &mut Vec<u8>) -> Resul
 /// Parses a JSON escape sequence and discards the value. Assumes the previous
 /// byte read was a backslash.
 fn ignore_escape<'de, R: ?Sized + Read<'de>>(read: &mut R) -> Result<()> {
+    debug!(ignore_escape);
     let ch = try!(next_or_eof(read));
 
     match ch {
@@ -1160,6 +1177,7 @@ fn ignore_escape<'de, R: ?Sized + Read<'de>>(read: &mut R) -> Result<()> {
 }
 
 fn decode_hex_escape<'de, R: ?Sized + Read<'de>>(read: &mut R) -> Result<u16> {
+    debug!(decode_hex_escape);
     let mut n = 0;
     for _ in 0..4 {
         n = match try!(next_or_eof(read)) {

@@ -23,7 +23,6 @@ itoa = "0.3"
 dtoa = "0.4"
 
 [dev-dependencies]
-compiletest_rs = "0.3"
 serde_bytes = "0.10"
 serde_derive = "1.0"
 
@@ -32,6 +31,7 @@ serde_derive = "1.0"
 
 [features]
 default = []
+debug = []
 
 # Use LinkedHashMap rather than BTreeMap as the map type of serde_json::Value.
 # This allows data to be read into a Value and written back to a JSON string

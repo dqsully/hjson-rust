@@ -171,6 +171,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
     /// Returns the first non-whitespace byte without consuming it, or `None` if
     /// EOF is encountered.
     fn parse_whitespace(&mut self) -> Result<Option<u8>> {
+        debug!(parse_whitespace);
         let mut line_comment = false;
         let mut multiline_comment = false;
 
@@ -238,6 +239,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
     /// Also returns whether the parsing traversed a newline character through a
     /// reference parameter
     fn parse_whitespace_get_newline(&mut self, had_newline: &mut bool) -> Result<Option<u8>> {
+        debug!(parse_whitespace_get_newline);
         let mut line_comment = false;
         let mut multiline_comment = false;
 
@@ -287,6 +289,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
 
     #[cold]
     fn peek_invalid_type(&mut self, exp: &Expected) -> Error {
+        debug!(peek_invalid_type);
         let err = match self.peek_or_null().unwrap_or(b'\x00') {
             b'n' => {
                 self.eat_char();
@@ -354,6 +357,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
     where
         V: de::Visitor<'de>,
     {
+        debug!(deserialize_number);
         let peek = match try!(self.parse_whitespace()) {
             Some(b) => b,
             None => {
@@ -388,6 +392,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
     }
 
     fn parse_ident(&mut self, ident: &[u8]) -> Result<()> {
+        debug!(parse_ident);
         for c in ident {
             if Some(*c) != try!(self.next_char()) {
                 return Err(self.error(ErrorCode::ExpectedSomeIdent));
@@ -399,6 +404,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
 
     fn parse_integer(&mut self, pos: bool) -> Result<Number> {
         match try!(self.next_char_or_null()) {
+        debug!(parse_integer);
             b'0' => {
                 // There can be only one leading '0'.
                 match try!(self.peek_or_null()) {
@@ -444,6 +450,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
         significand: u64,
         mut exponent: i32,
     ) -> Result<f64> {
+        debug!(parse_long_integer);
         loop {
             match try!(self.peek_or_null()) {
                 b'0'...b'9' => {
@@ -466,6 +473,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
     }
 
     fn parse_number(&mut self, pos: bool, significand: u64) -> Result<Number> {
+        debug!(parse_number);
         Ok(match try!(self.peek_or_null()) {
             b'.' => Number::F64(try!(self.parse_decimal(pos, significand, 0))),
             b'e' | b'E' => Number::F64(try!(self.parse_exponent(pos, significand, 0))),
@@ -492,6 +500,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
         mut significand: u64,
         mut exponent: i32,
     ) -> Result<f64> {
+        debug!(parse_decimal);
         self.eat_char();
 
         let mut at_least_one_digit = false;
@@ -529,6 +538,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
         significand: u64,
         starting_exp: i32,
     ) -> Result<f64> {
+        debug!(parse_exponent);
         self.eat_char();
 
         let pos_exp = match try!(self.peek_or_null()) {
@@ -581,6 +591,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
         significand: u64,
         pos_exp: bool,
     ) -> Result<f64> {
+        debug!(parse_exponent_overflow);
         // Error instead of +/- infinity.
         if significand != 0 && pos_exp {
             return Err(self.error(ErrorCode::NumberOutOfRange));
@@ -598,6 +609,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
         significand: u64,
         mut exponent: i32,
     ) -> Result<f64> {
+        debug!(f64_from_parts);
         let mut f = significand as f64;
         loop {
             match POW10.get(exponent.abs() as usize) {
@@ -628,6 +640,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
     }
 
     fn parse_object_colon(&mut self) -> Result<()> {
+        debug!(parse_object_colon);
         match try!(self.parse_whitespace()) {
             Some(b':') => {
                 self.eat_char();
@@ -639,6 +652,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
     }
 
     fn end_seq(&mut self) -> Result<()> {
+        debug!(end_seq);
         match try!(self.parse_whitespace()) {
             Some(b']') => {
                 self.eat_char();
@@ -657,6 +671,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
     }
 
     fn end_map(&mut self) -> Result<()> {
+        debug!(end_map);
         match try!(self.parse_whitespace()) {
             Some(b'}') => {
                 self.eat_char();
@@ -669,6 +684,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
     }
 
     fn ignore_value(&mut self) -> Result<()> {
+        debug!(ignore_value);
         let peek = match try!(self.parse_whitespace()) {
             Some(b) => b,
             None => {
@@ -733,6 +749,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
     }
 
     fn ignore_integer(&mut self) -> Result<()> {
+        debug!(ignore_integer);
         match try!(self.next_char_or_null()) {
             b'0' => {
                 // There can be only one leading '0'.
@@ -758,6 +775,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
     }
 
     fn ignore_decimal(&mut self) -> Result<()> {
+        debug!(ignore_decimal);
         self.eat_char();
 
         let mut at_least_one_digit = false;
@@ -777,6 +795,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
     }
 
     fn ignore_exponent(&mut self) -> Result<()> {
+        debug!(ignore_exponent);
         self.eat_char();
 
         match try!(self.peek_or_null()) {
@@ -800,6 +819,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
     }
 
     fn ignore_seq(&mut self) -> Result<()> {
+        debug!(ignore_seq);
         let mut had_newline;
 
         loop {
@@ -833,6 +853,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
     }
 
     fn ignore_map(&mut self) -> Result<()> {
+        debug!(ignore_map);
         let mut had_newline;
 
         loop {
@@ -937,6 +958,7 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
     where
         V: de::Visitor<'de>,
     {
+        debug!(deserialize_any);
         let peek = match try!(self.parse_whitespace()) {
             Some(b) => b,
             None => {
@@ -1023,6 +1045,7 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
     where
         V: de::Visitor<'de>,
     {
+        debug!(deserialize_bool);
         let peek = match try!(self.parse_whitespace()) {
             Some(b) => b,
             None => {
@@ -1131,6 +1154,7 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
     where
         V: de::Visitor<'de>,
     {
+        debug!(deserialize_str);
         let peek = match try!(self.parse_whitespace()) {
             Some(b) => b,
             None => {
@@ -1248,6 +1272,7 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
     where
         V: de::Visitor<'de>,
     {
+        debug!(deserialize_bytes);
         let peek = match try!(self.parse_whitespace()) {
             Some(b) => b,
             None => {
@@ -1296,6 +1321,7 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
     where
         V: de::Visitor<'de>,
     {
+        debug!(deserialize_option);
         match try!(self.parse_whitespace()) {
             Some(b'n') => {
                 self.eat_char();
@@ -1310,6 +1336,7 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
     where
         V: de::Visitor<'de>,
     {
+        debug!(deserialize_unit);
         let peek = match try!(self.parse_whitespace()) {
             Some(b) => b,
             None => {
@@ -1356,6 +1383,7 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
     where
         V: de::Visitor<'de>,
     {
+        debug!(deserialize_seq);
         let peek = match try!(self.parse_whitespace()) {
             Some(b) => b,
             None => {
@@ -1416,6 +1444,7 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
     where
         V: de::Visitor<'de>,
     {
+        debug!(deserialize_map);
         let peek = match try!(self.parse_whitespace()) {
             Some(b) => b,
             None => {
@@ -1458,6 +1487,7 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
     where
         V: de::Visitor<'de>,
     {
+        debug!(deserialize_struct);
         let peek = match try!(self.parse_whitespace()) {
             Some(b) => b,
             None => {
@@ -1519,6 +1549,7 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
     where
         V: de::Visitor<'de>,
     {
+        debug!(deserialize_enum);
         match try!(self.parse_whitespace()) {
             Some(b'{') => {
                 self.remaining_depth -= 1;
@@ -1560,6 +1591,7 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
     where
         V: de::Visitor<'de>,
     {
+        debug!(deserialize_ignored_any);
         try!(self.ignore_value());
         visitor.visit_unit()
     }
@@ -1584,7 +1616,7 @@ impl<'de, 'a, R: Read<'de> + 'a> de::SeqAccess<'de> for SeqAccess<'a, R> {
     where
         T: de::DeserializeSeed<'de>,
     {
-
+        debug!(next_element_seed);
         match try!(self.de.parse_whitespace()) {
             Some(b']') => {
                 self.de.eat_char();
@@ -1635,6 +1667,7 @@ impl<'de, 'a, R: Read<'de> + 'a> de::MapAccess<'de> for MapAccess<'a, R> {
     where
         K: de::DeserializeSeed<'de>,
     {
+        debug!(next_key_seed);
         match try!(self.de.parse_whitespace()) {
             Some(b'}') => {
                 self.de.eat_char();
@@ -1660,6 +1693,7 @@ impl<'de, 'a, R: Read<'de> + 'a> de::MapAccess<'de> for MapAccess<'a, R> {
     where
         V: de::DeserializeSeed<'de>,
     {
+        debug!(next_value_seed);
         try!(self.de.parse_object_colon());
 
         let ret = seed.deserialize(&mut *self.de);
@@ -1700,6 +1734,7 @@ impl<'de, 'a, R: Read<'de> + 'a> de::EnumAccess<'de> for VariantAccess<'a, R> {
     where
         V: de::DeserializeSeed<'de>,
     {
+        debug!(variant_seed);
         let val = try!(seed.deserialize(&mut *self.de));
         try!(self.de.parse_object_colon());
         Ok((val, self))
@@ -1717,6 +1752,7 @@ impl<'de, 'a, R: Read<'de> + 'a> de::VariantAccess<'de> for VariantAccess<'a, R>
     where
         T: de::DeserializeSeed<'de>,
     {
+        debug!(newtype_variant_seed);
         seed.deserialize(self.de)
     }
 
@@ -1724,6 +1760,7 @@ impl<'de, 'a, R: Read<'de> + 'a> de::VariantAccess<'de> for VariantAccess<'a, R>
     where
         V: de::Visitor<'de>,
     {
+        debug!(tuple_variant);
         de::Deserializer::deserialize_seq(self.de, visitor)
     }
 
@@ -1731,6 +1768,7 @@ impl<'de, 'a, R: Read<'de> + 'a> de::VariantAccess<'de> for VariantAccess<'a, R>
     where
         V: de::Visitor<'de>,
     {
+        debug!(struct_variant);
         de::Deserializer::deserialize_struct(self.de, "", fields, visitor)
     }
 }
@@ -1753,6 +1791,7 @@ impl<'de, 'a, R: Read<'de> + 'a> de::EnumAccess<'de> for UnitVariantAccess<'a, R
     where
         V: de::DeserializeSeed<'de>,
     {
+        debug!(variant_seed);
         let variant = try!(seed.deserialize(&mut *self.de));
         Ok((variant, self))
     }
@@ -1799,6 +1838,7 @@ macro_rules! deserialize_integer_key {
         where
             V: de::Visitor<'de>,
         {
+            debug!($deserialize);
             let string;
             match try!(self.de.peek()) {
                 Some(b'"') => {

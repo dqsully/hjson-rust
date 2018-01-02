@@ -280,3 +280,13 @@ macro_rules! json_internal {
         $crate::to_value(&$other).unwrap()
     };
 }
+
+#[cfg(feature = "debug")]
+macro_rules! debug {
+    ($fn:ident) => (println!("\x1b[38;5;33mAt \x1b[3m{}\x1b[0m, ({}:{}:{})", stringify!($fn), file!(), line!(), column!()));
+    ($fn:ident, $log:expr, $($arg:tt)*) => (println!("\x1b[38;5;33mAt \x1b[3m{}\x1b[0m, ({}:{}:{}), {}", stringify!($fn), file!(), line!(), column!(), format!($log, $($arg)*)));
+}
+#[cfg(not(feature = "debug"))]
+macro_rules! debug {
+    ($($arg:tt)*) => ();
+}
