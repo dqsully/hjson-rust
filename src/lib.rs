@@ -309,10 +309,13 @@
 //! [to_writer]: https://docs.serde.rs/serde_json/ser/fn.to_writer.html
 //! [macro]: https://docs.serde.rs/serde_json/macro.json.html
 
-#![doc(html_root_url = "https://docs.rs/serde_json/1.0.5")]
+#![doc(html_root_url = "https://docs.rs/serde_json/1.0.9")]
 #![cfg_attr(feature = "cargo-clippy", deny(clippy, clippy_pedantic))]
-// Because of "JavaScript"... fixed in Manishearth/rust-clippy#1071
-#![cfg_attr(feature = "cargo-clippy", allow(doc_markdown))]
+// Whitelisted clippy lints
+#![cfg_attr(feature = "cargo-clippy", allow(
+    doc_markdown,
+    needless_pass_by_value,
+))]
 // Whitelisted clippy_pedantic lints
 #![cfg_attr(feature = "cargo-clippy", allow(
 // Deserializer::from_str, into_iter
@@ -354,6 +357,19 @@ pub use self::ser::{Serializer, to_string, to_string_pretty, to_vec, to_vec_pret
                     to_writer_pretty};
 #[doc(inline)]
 pub use self::value::{Map, Number, Value, from_value, to_value};
+
+// We only use our own error type; no need for From conversions provided by the
+// standard library's try! macro. This reduces lines of LLVM IR by 4%.
+macro_rules! try {
+    ($e:expr) => {
+        match $e {
+            ::std::result::Result::Ok(val) => val,
+            ::std::result::Result::Err(err) => {
+                return ::std::result::Result::Err(err)
+            }
+        }
+    }
+}
 
 #[macro_use]
 mod macros;
