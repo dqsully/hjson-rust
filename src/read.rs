@@ -232,7 +232,7 @@ where
         debug!(parse_double_str_bytes);
         loop {
             let ch = try!(next_or_eof(self));
-            if !ESCAPE[ch as usize] {
+            if !ESCAPE_DOUBLE[ch as usize] {
                 scratch.push(ch);
                 continue;
             }
@@ -266,7 +266,7 @@ where
         debug!(parse_single_str_bytes);
         loop {
             let ch = try!(next_or_eof(self));
-            if !ESCAPE[ch as usize] {
+            if !ESCAPE_SINGLE[ch as usize] {
                 scratch.push(ch);
                 continue;
             }
@@ -319,7 +319,7 @@ where
         debug!(parse_member_name_bytes);
         loop {
             let ch = try!(next_or_eof(self));
-            if !is_whitespace(ch) {
+            if !is_whitespace(ch) && ch != b':' {
                 scratch.push(ch);
             } else {
                 return result(self, scratch);
@@ -444,7 +444,7 @@ where
         debug!(ignore_double_str);
         loop {
             let ch = try!(next_or_eof(self));
-            if !ESCAPE[ch as usize] {
+            if !ESCAPE_DOUBLE[ch as usize] {
                 continue;
             }
             match ch {
@@ -465,7 +465,7 @@ where
         debug!(ignore_single_str);
         loop {
             let ch = try!(next_or_eof(self));
-            if !ESCAPE[ch as usize] {
+            if !ESCAPE_SINGLE[ch as usize] {
                 continue;
             }
             match ch {
@@ -552,7 +552,7 @@ impl<'a> SliceRead<'a> {
         let mut start = self.index;
 
         loop {
-            while self.index < self.slice.len() && !ESCAPE[self.slice[self.index] as usize] {
+            while self.index < self.slice.len() && !ESCAPE_DOUBLE[self.slice[self.index] as usize] {
                 self.index += 1;
             }
             if self.index == self.slice.len() {
@@ -608,7 +608,7 @@ impl<'a> SliceRead<'a> {
         let mut start = self.index;
 
         loop {
-            while self.index < self.slice.len() && !ESCAPE[self.slice[self.index] as usize] {
+            while self.index < self.slice.len() && !ESCAPE_SINGLE[self.slice[self.index] as usize] {
                 self.index += 1;
             }
             if self.index == self.slice.len() {
@@ -675,7 +675,6 @@ impl<'a> SliceRead<'a> {
         // Fast path: return a slice of the raw JSON without any
         // copying.
         let borrowed = &self.slice[start..self.index];
-        self.index += 1;
         return result(self, borrowed).map(Reference::Borrowed);
     }
 
@@ -695,17 +694,21 @@ impl<'a> SliceRead<'a> {
         let start = self.index;
 
         loop {
-            while self.index < self.slice.len() && !is_whitespace(self.slice[self.index]) {
+            while
+                self.index < self.slice.len() &&
+                !is_whitespace(self.slice[self.index]) &&
+                self.slice[self.index] != b':'
+            {
                 self.index += 1;
             }
             if self.index == self.slice.len() {
                 return error(self, ErrorCode::EofWhileParsingString);
             }
 
+
             // Fast path: return a slice of the raw JSON without any
             // copying.
             let borrowed = &self.slice[start..self.index];
-            self.index += 1;
             return result(self, borrowed).map(Reference::Borrowed);
         }
     }
@@ -808,7 +811,7 @@ impl<'a> Read<'a> for SliceRead<'a> {
     fn ignore_double_str(&mut self) -> Result<()> {
         debug!(ignore_double_str);
         loop {
-            while self.index < self.slice.len() && !ESCAPE[self.slice[self.index] as usize] {
+            while self.index < self.slice.len() && !ESCAPE_DOUBLE[self.slice[self.index] as usize] {
                 self.index += 1;
             }
             if self.index == self.slice.len() {
@@ -833,7 +836,7 @@ impl<'a> Read<'a> for SliceRead<'a> {
     fn ignore_single_str(&mut self) -> Result<()> {
         debug!(ignore_single_str);
         loop {
-            while self.index < self.slice.len() && !ESCAPE[self.slice[self.index] as usize] {
+            while self.index < self.slice.len() && !ESCAPE_SINGLE[self.slice[self.index] as usize] {
                 self.index += 1;
             }
             if self.index == self.slice.len() {
@@ -872,7 +875,12 @@ impl<'a> Read<'a> for SliceRead<'a> {
     }
 
     fn ignore_member_name(&mut self) -> Result<()> {
-        while self.index < self.slice.len() && !is_whitespace(self.slice[self.index]) {
+        debug!(ignore_member_name);
+        while
+            self.index < self.slice.len() &&
+            !is_whitespace(self.slice[self.index]) &&
+            self.slice[self.index] != b':'
+        {
             self.index += 1;
         }
         if self.index == self.slice.len() {
@@ -1015,17 +1023,40 @@ impl<'a> Read<'a> for StrRead<'a> {
 
 const CT: bool = true; // control character \x00...\x1F
 const QU: bool = true; // quote \x22
+const AP: bool = true; // apostrophe \x22
 const BS: bool = true; // backslash \x5C
 const O: bool = false; // allow unescaped
 
 // Lookup table of bytes that must be escaped. A value of true at index i means
 // that byte i requires an escape sequence in the input.
 #[cfg_attr(rustfmt, rustfmt_skip)]
-static ESCAPE: [bool; 256] = [
+static ESCAPE_DOUBLE: [bool; 256] = [
     //   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
     CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, // 0
     CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, // 1
      O,  O, QU,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O, // 2
+     O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O, // 3
+     O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O, // 4
+     O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O, BS,  O,  O,  O, // 5
+     O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O, // 6
+     O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O, // 7
+     O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O, // 8
+     O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O, // 9
+     O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O, // A
+     O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O, // B
+     O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O, // C
+     O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O, // D
+     O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O, // E
+     O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O, // F
+];
+// Lookup table of bytes that must be escaped. A value of true at index i means
+// that byte i requires an escape sequence in the input.
+#[cfg_attr(rustfmt, rustfmt_skip)]
+static ESCAPE_SINGLE: [bool; 256] = [
+    //   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
+    CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, // 0
+    CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, CT, // 1
+     O,  O,  O,  O,  O,  O,  O, AP,  O,  O,  O,  O,  O,  O,  O,  O, // 2
      O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O, // 3
      O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O, // 4
      O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O,  O, BS,  O,  O,  O, // 5
@@ -1065,6 +1096,7 @@ fn parse_escape<'de, R: Read<'de>>(read: &mut R, scratch: &mut Vec<u8>) -> Resul
 
     match ch {
         b'"' => scratch.push(b'"'),
+        b'\'' => scratch.push(b'\''),
         b'\\' => scratch.push(b'\\'),
         b'/' => scratch.push(b'/'),
         b'b' => scratch.push(b'\x08'),
@@ -1135,7 +1167,7 @@ fn ignore_escape<'de, R: ?Sized + Read<'de>>(read: &mut R) -> Result<()> {
     let ch = try!(next_or_eof(read));
 
     match ch {
-        b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => {}
+        b'"' | b'\'' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => {}
         b'u' => {
             let n = match try!(decode_hex_escape(read)) {
                 0xDC00...0xDFFF => {

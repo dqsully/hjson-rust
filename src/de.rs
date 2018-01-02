@@ -273,10 +273,28 @@ impl<'de, R: Read<'de>> Deserializer<R> {
                 self.eat_char();
             } else {
                 match try!(self.peek()) {
+                    Some(b' ') | Some(b'\t') => {},
                     Some(b'\n') | Some(b'\r') => {
                         *had_newline = true;
                     }
-                    Some(b' ') | Some(b'\t') => {}
+                    Some(b'#') => {
+                        line_comment = true;
+                    }
+                    Some(b'/') => {
+                        match try!(self.peek()) {
+                            Some(b'/') => {
+                                line_comment = true;
+                            }
+                            Some(b'*') => {
+                                multiline_comment = true;
+                            }
+                            other => {
+                                return Ok(other);
+                            }
+                        }
+
+                        self.eat_char();
+                    }
                     other => {
                         return Ok(other);
                     }
@@ -403,9 +421,10 @@ impl<'de, R: Read<'de>> Deserializer<R> {
     }
 
     fn parse_integer(&mut self, pos: bool) -> Result<Number> {
-        match try!(self.next_char_or_null()) {
         debug!(parse_integer);
+        match try!(self.peek_or_null()) {
             b'0' => {
+                self.next_char();
                 // There can be only one leading '0'.
                 match try!(self.peek_or_null()) {
                     b'0'...b'9' => Err(self.peek_error(ErrorCode::InvalidNumber)),
@@ -413,6 +432,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
                 }
             }
             c @ b'1'...b'9' => {
+                self.next_char();
                 let mut res = (c - b'0') as u64;
 
                 loop {
@@ -969,28 +989,78 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
         let value = match peek {
             b'n' => {
                 self.eat_char();
-                try!(self.parse_ident(b"ull"));
-                visitor.visit_unit()
+                match self.parse_ident(b"ull") {
+                    Ok(_) => visitor.visit_unit(),
+                    Err(_) => {
+                        self.str_buf.clear();
+                        match try!(self.read.parse_none_str(&mut self.str_buf)) {
+                            Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
+                            Reference::Copied(s) => visitor.visit_str(s),
+                        }
+                    }
+                }
             }
             b't' => {
                 self.eat_char();
-                try!(self.parse_ident(b"rue"));
-                visitor.visit_bool(true)
+                match self.parse_ident(b"rue") {
+                    Ok(_) => visitor.visit_bool(true),
+                    Err(_) => {
+                        self.str_buf.clear();
+                        match try!(self.read.parse_none_str(&mut self.str_buf)) {
+                            Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
+                            Reference::Copied(s) => visitor.visit_str(s),
+                        }
+                    }
+                }
             }
             b'f' => {
                 self.eat_char();
-                try!(self.parse_ident(b"alse"));
-                visitor.visit_bool(false)
+                match self.parse_ident(b"alse") {
+                    Ok(_) => visitor.visit_bool(false),
+                    Err(_) => {
+                        self.str_buf.clear();
+                        match try!(self.read.parse_none_str(&mut self.str_buf)) {
+                            Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
+                            Reference::Copied(s) => visitor.visit_str(s),
+                        }
+                    }
+                }
             }
             b'-' => {
                 self.eat_char();
-                try!(self.parse_integer(false)).visit(visitor)
+                match self.parse_integer(false) {
+                    Ok(num) => num.visit(visitor),
+                    Err(_) => {
+                        self.str_buf.clear();
+                        match try!(self.read.parse_none_str(&mut self.str_buf)) {
+                            Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
+                            Reference::Copied(s) => visitor.visit_str(s),
+                        }
+                    }
+                }
             }
-            b'0'...b'9' => try!(self.parse_integer(true)).visit(visitor),
+            b'0'...b'9' => match self.parse_integer(true) {
+                Ok(num) => num.visit(visitor),
+                Err(_) => {
+                    self.str_buf.clear();
+                    match try!(self.read.parse_none_str(&mut self.str_buf)) {
+                        Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
+                        Reference::Copied(s) => visitor.visit_str(s),
+                    }
+                }
+            }
             b'"' => {
                 self.eat_char();
                 self.str_buf.clear();
-                match try!(self.read.parse_str(&mut self.str_buf)) {
+                match try!(self.read.parse_double_str(&mut self.str_buf)) {
+                    Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
+                    Reference::Copied(s) => visitor.visit_str(s),
+                }
+            }
+            b'\'' => {
+                self.eat_char();
+                self.str_buf.clear();
+                match try!(self.read.parse_single_str(&mut self.str_buf)) {
                     Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
                     Reference::Copied(s) => visitor.visit_str(s),
                 }
@@ -1027,7 +1097,13 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
                     (Err(err), _) | (_, Err(err)) => Err(err),
                 }
             }
-            _ => Err(self.peek_error(ErrorCode::ExpectedSomeValue)),
+            _ => {
+                self.str_buf.clear();
+                match try!(self.read.parse_none_str(&mut self.str_buf)) {
+                    Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
+                    Reference::Copied(s) => visitor.visit_str(s),
+                }
+            }
         };
 
         match value {
@@ -1166,7 +1242,15 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
             b'"' => {
                 self.eat_char();
                 self.str_buf.clear();
-                match try!(self.read.parse_str(&mut self.str_buf)) {
+                match try!(self.read.parse_double_str(&mut self.str_buf)) {
+                    Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
+                    Reference::Copied(s) => visitor.visit_str(s),
+                }
+            }
+            b'\'' => {
+                self.eat_char();
+                self.str_buf.clear();
+                match try!(self.read.parse_single_str(&mut self.str_buf)) {
                     Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
                     Reference::Copied(s) => visitor.visit_str(s),
                 }
@@ -1289,7 +1373,7 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
                     Reference::Copied(b) => visitor.visit_bytes(b),
                 }
             }
-            Some(b'\'') => {
+            b'\'' => {
                 self.eat_char();
                 self.str_buf.clear();
                 match try!(self.read.parse_single_str_raw(&mut self.str_buf)) {
@@ -1670,16 +1754,11 @@ impl<'de, 'a, R: Read<'de> + 'a> de::MapAccess<'de> for MapAccess<'a, R> {
         debug!(next_key_seed);
         match try!(self.de.parse_whitespace()) {
             Some(b'}') => {
-                self.de.eat_char();
                 return Ok(None);
             }
             Some(b',') => {
                 return Err(self.de.peek_error(ErrorCode::ExtraComma));
-            }
-            _ => (),
-        }
-
-        match try!(self.de.parse_whitespace()) {
+            },
             Some(_) => {
                 seed.deserialize(MapKey { de: &mut *self.de }).map(Some)
             }
@@ -1880,11 +1959,31 @@ where
     where
         V: de::Visitor<'de>,
     {
-        self.de.eat_char();
-        self.de.str_buf.clear();
-        match try!(self.de.read.parse_str(&mut self.de.str_buf)) {
-            Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
-            Reference::Copied(s) => visitor.visit_str(s),
+        debug!(deserialize_any);
+        match try!(self.de.peek_or_null()) {
+            b'"' => {
+                self.de.eat_char();
+                self.de.str_buf.clear();
+                match try!(self.de.read.parse_double_str(&mut self.de.str_buf)) {
+                    Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
+                    Reference::Copied(s) => visitor.visit_str(s),
+                }
+            },
+            b'\'' => {
+                self.de.eat_char();
+                self.de.str_buf.clear();
+                match try!(self.de.read.parse_single_str(&mut self.de.str_buf)) {
+                    Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
+                    Reference::Copied(s) => visitor.visit_str(s),
+                }
+            },
+            _ => {
+                self.de.str_buf.clear();
+                match try!(self.de.read.parse_member_name(&mut self.de.str_buf)) {
+                    Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
+                    Reference::Copied(s) => visitor.visit_str(s),
+                }
+            },
         }
     }
 
