@@ -264,6 +264,10 @@ where
         F: FnOnce(&'s Self, &'s [u8]) -> Result<T>,
     {
         debug!(parse_single_str_bytes);
+
+        let mut beginning = true;
+        let mut multiline = false;
+
         loop {
             let ch = try!(next_or_eof(self));
             if !ESCAPE_SINGLE[ch as usize] {
@@ -272,10 +276,41 @@ where
             }
             match ch {
                 b'\'' => {
-                    return result(self, scratch);
+                    if beginning {
+                        if let Ok(Some(b'\'')) = self.peek() {
+                            multiline = true;
+                            // Consume char
+                            try!(next_or_eof(self));
+                        } else {
+                            // Scratch is empty at this point
+                            return result(self, scratch);
+                        }
+                    } else if multiline {
+                        if let Ok(Some(b'\'')) = self.peek() {
+                            // Consume char
+                            try!(next_or_eof(self));
+
+                            if let Ok(Some(b'\'')) = self.peek() {
+                                // Consume char
+                                try!(next_or_eof(self));
+
+                                return result(self, scratch);
+                            } else {
+                                scratch.push(b'\'');
+                                scratch.push(b'\'');
+                            }
+                        } else {
+                            scratch.push(b'\'');
+                        }
+                    } else {
+                        return result(self, scratch);
+                    }
                 }
-                b'\\' => {
+                b'\\' => if !multiline {
                     try!(parse_escape(self, scratch));
+                }
+                b'\n' => if !multiline {
+                    return error(self, ErrorCode::UnexpectedNewline);
                 }
                 _ => {
                     if validate {
@@ -284,6 +319,8 @@ where
                     scratch.push(ch);
                 }
             }
+
+            beginning = false;
         }
     }
 
@@ -607,6 +644,9 @@ impl<'a> SliceRead<'a> {
         // Index of the first byte not yet copied into the scratch space.
         let mut start = self.index;
 
+        let mut beginning = true;
+        let mut multiline = false;
+
         loop {
             while self.index < self.slice.len() && !ESCAPE_SINGLE[self.slice[self.index] as usize] {
                 self.index += 1;
@@ -616,25 +656,52 @@ impl<'a> SliceRead<'a> {
             }
             match self.slice[self.index] {
                 b'\'' => {
-                    if scratch.is_empty() {
-                        // Fast path: return a slice of the raw JSON without any
-                        // copying.
-                        let borrowed = &self.slice[start..self.index];
-                        self.index += 1;
-                        return result(self, borrowed).map(Reference::Borrowed);
+                    if
+                        beginning &&
+                        self.index + 1 < self.slice.len() &&
+                        self.slice[self.index + 1] == b'\''
+                    {
+                        multiline = true;
+                        self.index += 2;
+                        start += 2;
+                    } else if
+                        (
+                            multiline &&
+                            self.index + 2 < self.slice.len() &&
+                            self.slice[self.index + 1] == b'\'' &&
+                            self.slice[self.index + 2] == b'\''
+                        ) ||
+                        !multiline
+                    {
+                        if scratch.is_empty() {
+                            // Fast path: return a slice of the raw JSON without any
+                            // copying.
+                            let borrowed = &self.slice[start..self.index];
+                            self.index += if multiline {3} else {1};
+                            return result(self, borrowed).map(Reference::Borrowed);
+                        } else {
+                            scratch.extend_from_slice(&self.slice[start..self.index]);
+                            // "as &[u8]" is required for rustc 1.8.0
+                            let copied = scratch as &[u8];
+                            self.index += if multiline {3} else {1};
+                            return result(self, copied).map(Reference::Copied);
+                        }
                     } else {
-                        scratch.extend_from_slice(&self.slice[start..self.index]);
-                        // "as &[u8]" is required for rustc 1.8.0
-                        let copied = scratch as &[u8];
                         self.index += 1;
-                        return result(self, copied).map(Reference::Copied);
                     }
                 }
-                b'\\' => {
+                b'\\' => if !multiline {
                     scratch.extend_from_slice(&self.slice[start..self.index]);
                     self.index += 1;
                     try!(parse_escape(self, scratch));
                     start = self.index;
+                } else {
+                    self.index += 1;
+                }
+                b'\n' => if !multiline {
+                    return error(self, ErrorCode::UnexpectedNewline);
+                } else {
+                    self.index += 1;
                 }
                 _ => {
                     if validate {
@@ -643,6 +710,8 @@ impl<'a> SliceRead<'a> {
                     self.index += 1;
                 }
             }
+
+            beginning = false;
         }
     }
 

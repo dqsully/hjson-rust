@@ -78,7 +78,9 @@ impl Error {
             ErrorCode::ExtraComma |
             ErrorCode::TrailingCharacters |
             ErrorCode::UnexpectedEndOfHexEscape |
-            ErrorCode::RecursionLimitExceeded => Category::Syntax,
+            ErrorCode::RecursionLimitExceeded |
+            ErrorCode::UnexpectedCharacter |
+            ErrorCode::UnexpectedNewline => Category::Syntax,
         }
     }
 
@@ -257,6 +259,12 @@ pub enum ErrorCode {
 
     /// Encountered nesting of JSON maps and arrays more than 128 layers deep.
     RecursionLimitExceeded,
+
+    /// Encountered another character directly after a value
+    UnexpectedCharacter,
+
+    /// Encountered a newline in a single-line string
+    UnexpectedNewline,
 }
 
 impl Error {
@@ -330,6 +338,8 @@ impl Display for ErrorCode {
             ErrorCode::TrailingCharacters => f.write_str("trailing characters"),
             ErrorCode::UnexpectedEndOfHexEscape => f.write_str("unexpected end of hex escape"),
             ErrorCode::RecursionLimitExceeded => f.write_str("recursion limit exceeded"),
+            ErrorCode::UnexpectedCharacter => f.write_str("unexpected character"),
+            ErrorCode::UnexpectedNewline => f.write_str("unexpected newline character"),
         }
     }
 }

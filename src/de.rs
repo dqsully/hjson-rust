@@ -27,6 +27,7 @@ pub struct Deserializer<R> {
     read: R,
     str_buf: Vec<u8>,
     remaining_depth: u8,
+    capture: bool,
 }
 
 impl<'de, R> Deserializer<R>
@@ -46,6 +47,7 @@ where
             read: read,
             str_buf: Vec::with_capacity(128),
             remaining_depth: 128,
+            capture: false,
         }
     }
 }
@@ -143,15 +145,35 @@ impl<'de, R: Read<'de>> Deserializer<R> {
     }
 
     fn eat_char(&mut self) {
-        self.read.discard();
+        if let Ok(Some(c)) = self.next_char() {
+            if self.capture {
+                self.str_buf.push(c);
+            }
+        }
     }
 
     fn next_char(&mut self) -> Result<Option<u8>> {
-        self.read.next().map_err(Error::io)
+        let ret = self.read.next().map_err(Error::io);
+
+        if let Ok(Some(c)) = ret {
+            if self.capture {
+                self.str_buf.push(c);
+            }
+        }
+
+        ret
     }
 
     fn next_char_or_null(&mut self) -> Result<u8> {
-        Ok(try!(self.next_char()).unwrap_or(b'\x00'))
+        let ret = Ok(try!(self.next_char()).unwrap_or(b'\x00'));
+
+        if let Ok(c) = ret {
+            if self.capture {
+                self.str_buf.push(c);
+            }
+        }
+
+        ret
     }
 
     /// Error caused by a byte from next_char().
@@ -180,6 +202,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
                 match try!(self.peek()) {
                     Some(b'\n') | Some(b'\r') => {
                         line_comment = false;
+                        println!("end line comment");
                     }
                     Some(_) => {}
                     None => {
@@ -191,9 +214,11 @@ impl<'de, R: Read<'de>> Deserializer<R> {
             } else if multiline_comment {
                 match try!(self.peek()) {
                     Some(b'*') => {
+                        self.eat_char();
+
                         if let Some(b'/') = try!(self.peek()) {
                                 multiline_comment = false;
-                                self.eat_char();
+                                println!("end multiline comment");
                         }
                     }
                     Some(_) => {}
@@ -208,21 +233,24 @@ impl<'de, R: Read<'de>> Deserializer<R> {
                     Some(b' ') | Some(b'\n') | Some(b'\t') | Some(b'\r') => {}
                     Some(b'#') => {
                         line_comment = true;
+                        println!("hash comment");
                     }
                     Some(b'/') => {
+                        self.eat_char();
+
                         match try!(self.peek()) {
                             Some(b'/') => {
                                 line_comment = true;
+                                println!("slash comment");
                             }
                             Some(b'*') => {
                                 multiline_comment = true;
+                                println!("multiline comment");
                             }
                             other => {
                                 return Ok(other);
                             }
                         }
-
-                        self.eat_char();
                     }
                     other => {
                         return Ok(other);
@@ -302,6 +330,84 @@ impl<'de, R: Read<'de>> Deserializer<R> {
 
                 self.eat_char();
             }
+        }
+    }
+
+    /// Returns the first non-whitespace byte without consuming it, or `None` if
+    /// EOF is encountered
+    /// Also returns whether the parsing traversed a newline character through a
+    /// reference parameter
+    fn parse_whitespace_until_newline(&mut self, had_newline: &mut bool) -> Result<Option<u8>> {
+        debug!(parse_whitespace_until_newline);
+        let mut line_comment = false;
+        let mut multiline_comment = false;
+
+        let mut prev = None;
+
+        loop {
+            if line_comment {
+                match try!(self.peek()) {
+                    Some(b'\n') | Some(b'\r') => {
+                        *had_newline = true;
+                        return Ok(prev);
+                    }
+                    Some(_) => {}
+                    None => {
+                        return Ok(None);
+                    }
+                }
+
+                self.eat_char();
+            } else if multiline_comment {
+                match try!(self.peek()) {
+                    Some(b'*') => {
+                        self.eat_char();
+
+                        if let Some(b'/') = try!(self.peek()) {
+                                multiline_comment = false;
+                        }
+                    }
+                    Some(_) => {}
+                    None => {
+                        return Ok(None);
+                    }
+                }
+
+                self.eat_char();
+            } else {
+                match try!(self.peek()) {
+                    Some(b' ') | Some(b'\t') => {},
+                    Some(b'\n') | Some(b'\r') => {
+                        *had_newline = true;
+                        return Ok(prev);
+                    }
+                    Some(b'#') => {
+                        line_comment = true;
+                    }
+                    Some(b'/') => {
+                        match try!(self.peek()) {
+                            Some(b'/') => {
+                                line_comment = true;
+                            }
+                            Some(b'*') => {
+                                multiline_comment = true;
+                            }
+                            other => {
+                                return Ok(other);
+                            }
+                        }
+
+                        self.eat_char();
+                    }
+                    other => {
+                        return Ok(other);
+                    }
+                }
+
+                self.eat_char();
+            }
+
+            prev = try!(self.peek());
         }
     }
 
@@ -417,14 +523,25 @@ impl<'de, R: Read<'de>> Deserializer<R> {
             }
         }
 
-        Ok(())
+        // Consume until newline, comma, or eof
+        let mut had_newline = false;
+
+        let c = try!(self.parse_whitespace_until_newline(&mut had_newline));
+
+        if had_newline {
+            Ok(())
+        } else if let Some(b',') = c {
+            Ok(())
+        } else {
+            Err(self.error(ErrorCode::UnexpectedCharacter))
+        }
     }
 
     fn parse_integer(&mut self, pos: bool) -> Result<Number> {
         debug!(parse_integer);
         match try!(self.peek_or_null()) {
             b'0' => {
-                self.next_char();
+                try!(self.next_char());
                 // There can be only one leading '0'.
                 match try!(self.peek_or_null()) {
                     b'0'...b'9' => Err(self.peek_error(ErrorCode::InvalidNumber)),
@@ -432,7 +549,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
                 }
             }
             c @ b'1'...b'9' => {
-                self.next_char();
+                try!(self.next_char());
                 let mut res = (c - b'0') as u64;
 
                 loop {
@@ -494,7 +611,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
 
     fn parse_number(&mut self, pos: bool, significand: u64) -> Result<Number> {
         debug!(parse_number);
-        Ok(match try!(self.peek_or_null()) {
+        let ret = Ok(match try!(self.peek_or_null()) {
             b'.' => Number::F64(try!(self.parse_decimal(pos, significand, 0))),
             b'e' | b'E' => Number::F64(try!(self.parse_exponent(pos, significand, 0))),
             _ => {
@@ -511,7 +628,20 @@ impl<'de, R: Read<'de>> Deserializer<R> {
                     }
                 }
             }
-        })
+        });
+
+        // Consume until newline, comma, or eof
+        let mut had_newline = false;
+
+        let c = try!(self.parse_whitespace_until_newline(&mut had_newline));
+
+        if had_newline {
+            ret
+        } else if let Some(b',') = c {
+            ret
+        } else {
+            Err(self.error(ErrorCode::UnexpectedCharacter))
+        }
     }
 
     fn parse_decimal(
@@ -994,8 +1124,9 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
                     Err(_) => {
                         self.str_buf.clear();
                         match try!(self.read.parse_none_str(&mut self.str_buf)) {
-                            Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
-                            Reference::Copied(s) => visitor.visit_str(s),
+                            // Can't treat the original string as borrowed anymore
+                            Reference::Borrowed(s) => visitor.visit_str(&("null".to_owned() + s)),
+                            Reference::Copied(s) => visitor.visit_str(&("null".to_owned() + &s)),
                         }
                     }
                 }
@@ -1007,8 +1138,9 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
                     Err(_) => {
                         self.str_buf.clear();
                         match try!(self.read.parse_none_str(&mut self.str_buf)) {
-                            Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
-                            Reference::Copied(s) => visitor.visit_str(s),
+                            // Can't treat the original string as borrowed anymore
+                            Reference::Borrowed(s) => visitor.visit_str(&("true".to_owned() + s)),
+                            Reference::Copied(s) => visitor.visit_str(&("true".to_owned() + &s)),
                         }
                     }
                 }
@@ -1020,34 +1152,57 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
                     Err(_) => {
                         self.str_buf.clear();
                         match try!(self.read.parse_none_str(&mut self.str_buf)) {
-                            Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
-                            Reference::Copied(s) => visitor.visit_str(s),
+                            // Can't treat the original string as borrowed anymore
+                            Reference::Borrowed(s) => visitor.visit_str(&("false".to_owned() + s)),
+                            Reference::Copied(s) => visitor.visit_str(&("false".to_owned() + &s)),
                         }
                     }
                 }
             }
             b'-' => {
+                self.str_buf.clear();
+                self.capture = true;
+
                 self.eat_char();
-                match self.parse_integer(false) {
+                let ret = match self.parse_integer(false) {
                     Ok(num) => num.visit(visitor),
                     Err(_) => {
+                        let captured_num = unsafe { String::from_utf8_unchecked(self.str_buf.clone()) };
+
+                        self.capture = false;
                         self.str_buf.clear();
                         match try!(self.read.parse_none_str(&mut self.str_buf)) {
-                            Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
-                            Reference::Copied(s) => visitor.visit_str(s),
+                            Reference::Borrowed(s) => visitor.visit_str(&(captured_num + s)),
+                            Reference::Copied(s) => visitor.visit_str(&(captured_num + &s)),
                         }
                     }
-                }
+                };
+
+                self.capture = false;
+
+                ret
             }
-            b'0'...b'9' => match self.parse_integer(true) {
-                Ok(num) => num.visit(visitor),
-                Err(_) => {
-                    self.str_buf.clear();
-                    match try!(self.read.parse_none_str(&mut self.str_buf)) {
-                        Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
-                        Reference::Copied(s) => visitor.visit_str(s),
+            b'0'...b'9' => {
+                self.str_buf.clear();
+                self.capture = true;
+
+                let ret = match self.parse_integer(true) {
+                    Ok(num) => num.visit(visitor),
+                    Err(_) => {
+                        let captured_num = unsafe { String::from_utf8_unchecked(self.str_buf.clone()) };
+
+                        self.capture = false;
+                        self.str_buf.clear();
+                        match try!(self.read.parse_none_str(&mut self.str_buf)) {
+                            Reference::Borrowed(s) => visitor.visit_str(&(captured_num + s)),
+                            Reference::Copied(s) => visitor.visit_str(&(captured_num + &s)),
+                        }
                     }
-                }
+                };
+
+                self.capture = false;
+
+                ret
             }
             b'"' => {
                 self.eat_char();
