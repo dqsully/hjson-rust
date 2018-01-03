@@ -21,54 +21,57 @@ fn get_test_content(name: &str) -> io::Result<String> {
     get_content(&p)
 }
 
-// fn get_result_content(name: &str) -> io::Result<(String,String)> {
-//     let p1 = format!("tests/cases/{}_result.json", name);
-//     let p2 = format!("tests/cases/{}_result.hjson", name);
-//     Ok(( try!(get_content(&p1)), try!(get_content(&p2))))
-// }
+fn get_result_content(name: &str) -> io::Result<(String,String)> {
+    let p1 = format!("tests/cases/{}_result.json", name);
+    let p2 = format!("tests/cases/{}_result.hjson", name);
+    Ok(( try!(get_content(&p1)), try!(get_content(&p2))))
+}
 
 macro_rules! test {
     ($v: ident) => {
-        #[test]
         #[allow(non_snake_case)]
-        fn $v() {
-            let name = stringify!($v);
+        mod $v {
+            use super::*;
 
-            let test_content = get_test_content(name).unwrap();
-            let data: Value = serde_hjson::from_str(&test_content).unwrap();
+            #[test]
+            fn try_parse() {
+                let name = stringify!($v);
 
-            // let (rjson, rhjson) = get_result_content(name).unwrap();
-            let actual_hjson = serde_hjson::to_string(&data).unwrap();
-            println!("{:?}", data);
-            println!("{}", actual_hjson);
-            //
-            // if rhjson != actual_hjson {
-            //     panic!("{:?}\n---hjson expected\n{}\n---hjson actual\n{}\n---\n", name, rhjson, actual_hjson);
-            // }
-            // TODO later normal json
+                let test_content = get_test_content(name).unwrap();
+                let _data: Value = serde_hjson::from_str(&test_content).unwrap();
+            }
+            #[test]
+            fn match_stringify() {
+                let name = stringify!($v);
+
+                let test_content = get_test_content(name).unwrap();
+                let data: Value = serde_hjson::from_str(&test_content).unwrap();
+
+                let (_, rhjson) = get_result_content(name).unwrap();
+                let actual_hjson = serde_hjson::to_string(&data).unwrap();
+
+                if rhjson != actual_hjson {
+                    panic!("{:?}\n---hjson expected\n{}\n---hjson actual\n{}\n---\n", name, rhjson, actual_hjson);
+                }
+                // TODO later normal json
+            }
         }
     }
 }
 macro_rules! test_failure {
     ($v: ident) => {
-        #[test]
-        #[should_panic]
         #[allow(non_snake_case)]
-        fn $v() {
-            let name = stringify!($v);
+            mod $v {
+            use super::*;
 
-            let test_content = get_test_content(name).unwrap();
-            let data: Value = serde_hjson::from_str(&test_content).unwrap();
+            #[test]
+            #[should_panic]
+            fn try_parse() {
+                let name = stringify!($v);
 
-            // let (rjson, rhjson) = get_result_content(name).unwrap();
-            let actual_hjson = serde_hjson::to_string(&data).unwrap();
-            println!("{:?}", data);
-            println!("{}", actual_hjson);
-            //
-            // if rhjson != actual_hjson {
-            //     panic!("{:?}\n---hjson expected\n{}\n---hjson actual\n{}\n---\n", name, rhjson, actual_hjson);
-            // }
-            // TODO later normal json
+                let test_content = get_test_content(name).unwrap();
+                let _data: Value = serde_hjson::from_str(&test_content).unwrap();
+            }
         }
     }
 }
