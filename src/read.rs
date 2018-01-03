@@ -737,9 +737,6 @@ impl<'a> SliceRead<'a> {
         {
             self.index += 1;
         }
-        if self.index == self.slice.len() {
-            return error(self, ErrorCode::EofWhileParsingString);
-        }
 
         // Fast path: return a slice of the raw JSON without any
         // copying.

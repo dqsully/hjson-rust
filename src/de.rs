@@ -202,7 +202,6 @@ impl<'de, R: Read<'de>> Deserializer<R> {
                 match try!(self.peek()) {
                     Some(b'\n') | Some(b'\r') => {
                         line_comment = false;
-                        println!("end line comment");
                     }
                     Some(_) => {}
                     None => {
@@ -218,7 +217,6 @@ impl<'de, R: Read<'de>> Deserializer<R> {
 
                         if let Some(b'/') = try!(self.peek()) {
                                 multiline_comment = false;
-                                println!("end multiline comment");
                         }
                     }
                     Some(_) => {}
@@ -233,7 +231,6 @@ impl<'de, R: Read<'de>> Deserializer<R> {
                     Some(b' ') | Some(b'\n') | Some(b'\t') | Some(b'\r') => {}
                     Some(b'#') => {
                         line_comment = true;
-                        println!("hash comment");
                     }
                     Some(b'/') => {
                         self.eat_char();
@@ -241,11 +238,9 @@ impl<'de, R: Read<'de>> Deserializer<R> {
                         match try!(self.peek()) {
                             Some(b'/') => {
                                 line_comment = true;
-                                println!("slash comment");
                             }
                             Some(b'*') => {
                                 multiline_comment = true;
-                                println!("multiline comment");
                             }
                             other => {
                                 return Ok(other);
@@ -530,10 +525,13 @@ impl<'de, R: Read<'de>> Deserializer<R> {
 
         if had_newline {
             Ok(())
-        } else if let Some(b',') = c {
-            Ok(())
         } else {
-            Err(self.error(ErrorCode::UnexpectedCharacter))
+            match c {
+                Some(b',') |
+                Some(b']') |
+                Some(b'}') => Ok(()),
+                _ => Err(self.error(ErrorCode::UnexpectedCharacter)),
+            }
         }
     }
 
@@ -637,10 +635,13 @@ impl<'de, R: Read<'de>> Deserializer<R> {
 
         if had_newline {
             ret
-        } else if let Some(b',') = c {
-            ret
         } else {
-            Err(self.error(ErrorCode::UnexpectedCharacter))
+            match c {
+                Some(b',') |
+                Some(b']') |
+                Some(b'}') => ret,
+                _ => Err(self.error(ErrorCode::UnexpectedCharacter)),
+            }
         }
     }
 
@@ -803,7 +804,8 @@ impl<'de, R: Read<'de>> Deserializer<R> {
 
     fn end_seq(&mut self) -> Result<()> {
         debug!(end_seq);
-        match try!(self.parse_whitespace()) {
+        let ch = try!(self.parse_whitespace());
+        match ch {
             Some(b']') => {
                 self.eat_char();
                 Ok(())
@@ -1858,7 +1860,6 @@ impl<'de, 'a, R: Read<'de> + 'a> de::SeqAccess<'de> for SeqAccess<'a, R> {
         debug!(next_element_seed);
         match try!(self.de.parse_whitespace()) {
             Some(b']') => {
-                self.de.eat_char();
                 return Ok(None);
             }
             Some(b',') => {
