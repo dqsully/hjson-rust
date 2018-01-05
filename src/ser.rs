@@ -19,6 +19,24 @@ use super::error::{Error, ErrorCode, Result};
 use itoa;
 use dtoa;
 
+use regex::Regex;
+
+lazy_static! {
+    // If a string matches this, go to RE_STR_DOUBLE
+    static ref RE_VALUE: Regex = Regex::new(r#"^(?:-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)(?:\s*$|\s*(?:[,}\]#/]|/[^/*]))"#).unwrap();
+    // If a string doesn't match this, go to RE_STR_DOUBLE, else use no quotes
+    static ref RE_STR_NONE: Regex = Regex::new(r#"^(?:[^\x00-\x1f\s"'{}\[\],:/#]|/[^\x00-\x1f\t\n/*])(?:[^\x00-\x1f\t\n]*[^\x00-\x1f\s"])?$"#).unwrap();
+    // If a string doesn't match this, go to RE_STR_MULTILINE, else use quotes and whitespace escapes
+    static ref RE_STR_DOUBLE: Regex = Regex::new(r#"^([^\t\n"](?:[^\t\n"]*[^\t\n"])?|[\s\x08]+)$"#).unwrap();
+    // If a quoted string matches this, go to RE_STR_MULTILINE
+    static ref RE_HAS_NEWLINE: Regex = Regex::new(r#"\n"#).unwrap();
+    // If a string doesn't match this, use double quotes, else use multiline quotes
+    static ref RE_STR_MULTILINE: Regex = Regex::new(r#"^([^']|'[^']|''[^'])+$"#).unwrap();
+
+    // If a member string doesn't match this, use double quotes, else use no quotes
+    static ref RE_MEMBER_NONE: Regex = Regex::new(r#"^(?:[^\x00-\x1f\s"'{}\[\],:/#]|/[^\x00-\x1f\s"'{}\[\],:/*])(?:(?:[^\x00-\x1f\s"'{}\[\],:/#]|/[^\x00-\x1f\s"'{}\[\],:/*])*[^\x00-\x1f\s"'{}\[\],:/#])?$"#).unwrap();
+}
+
 /// A structure for serializing Rust values into JSON.
 pub struct Serializer<W, F = CompactFormatter> {
     writer: W,
@@ -503,7 +521,7 @@ where
         {
             fn write_str(&mut self, s: &str) -> fmt::Result {
                 assert!(self.error.is_none());
-                match format_escaped_str_contents(self.writer, self.formatter, s) {
+                match self.formatter.write_string(self.writer, s) {
                     Ok(()) => Ok(()),
                     Err(err) => {
                         self.error = Some(err);
@@ -513,29 +531,17 @@ where
             }
         }
 
-        try!(
-            self.formatter
-                .begin_string(&mut self.writer)
-                .map_err(Error::io)
-        );
-        {
-            let mut adapter = Adapter {
-                writer: &mut self.writer,
-                formatter: &mut self.formatter,
-                error: None,
-            };
-            match write!(adapter, "{}", value) {
-                Ok(()) => assert!(adapter.error.is_none()),
-                Err(fmt::Error) => {
-                    return Err(Error::io(adapter.error.expect("there should be an error")));
-                }
+        let mut adapter = Adapter {
+            writer: &mut self.writer,
+            formatter: &mut self.formatter,
+            error: None,
+        };
+        match write!(adapter, "{}", value) {
+            Ok(()) => assert!(adapter.error.is_none()),
+            Err(fmt::Error) => {
+                return Err(Error::io(adapter.error.expect("there should be an error")));
             }
         }
-        try!(
-            self.formatter
-                .end_string(&mut self.writer)
-                .map_err(Error::io)
-        );
         Ok(())
     }
 }
@@ -846,7 +852,8 @@ where
 
     #[inline]
     fn serialize_str(self, value: &str) -> Result<()> {
-        self.ser.serialize_str(value)
+        self.ser.formatter.write_member_string(&mut self.ser.writer, value)
+            .map_err(Error::io)
     }
 
     #[inline]
@@ -1148,46 +1155,6 @@ where
     }
 }
 
-/// Represents a character escape code in a type-safe manner.
-pub enum CharEscape {
-    /// An escaped quote `"`
-    Quote,
-    /// An escaped reverse solidus `\`
-    ReverseSolidus,
-    /// An escaped solidus `/`
-    Solidus,
-    /// An escaped backspace character (usually escaped as `\b`)
-    Backspace,
-    /// An escaped form feed character (usually escaped as `\f`)
-    FormFeed,
-    /// An escaped line feed character (usually escaped as `\n`)
-    LineFeed,
-    /// An escaped carriage return character (usually escaped as `\r`)
-    CarriageReturn,
-    /// An escaped tab character (usually escaped as `\t`)
-    Tab,
-    /// An escaped ASCII plane control character (usually escaped as
-    /// `\u00XX` where `XX` are two hex characters)
-    AsciiControl(u8),
-}
-
-impl CharEscape {
-    #[inline]
-    fn from_escape_table(escape: u8, byte: u8) -> CharEscape {
-        match escape {
-            self::BB => CharEscape::Backspace,
-            self::TT => CharEscape::Tab,
-            self::NN => CharEscape::LineFeed,
-            self::FF => CharEscape::FormFeed,
-            self::RR => CharEscape::CarriageReturn,
-            self::QU => CharEscape::Quote,
-            self::BS => CharEscape::ReverseSolidus,
-            self::U => CharEscape::AsciiControl(byte),
-            _ => unreachable!(),
-        }
-    }
-}
-
 /// This trait abstracts away serializing the JSON control characters, which allows the user to
 /// optionally pretty print the JSON output.
 pub trait Formatter {
@@ -1324,14 +1291,55 @@ pub trait Formatter {
         writer.write_all(b"\"")
     }
 
-    /// Writes a string fragment that doesn't need any escaping to the
-    /// specified writer.
+    /// Writes a full string including starting and ending quotes
     #[inline]
-    fn write_string_fragment<W: ?Sized>(&mut self, writer: &mut W, fragment: &str) -> io::Result<()>
+    fn write_string<W: ?Sized>(&mut self, writer: &mut W, string: &str) -> io::Result<()>
     where
         W: io::Write,
     {
-        writer.write_all(fragment.as_bytes())
+        try!(writer.write_all(b"\""));
+
+
+        let bytes = string.as_bytes();
+
+        let mut start = 0;
+        let mut skip = 0;
+
+        for (i, &byte) in bytes.iter().enumerate() {
+            if skip > 1 {
+                skip -= 1;
+                start = i + 1;
+                continue;
+            }
+
+            let escape = ESCAPE[byte as usize];
+            if escape == 0 {
+                continue;
+            }
+
+            if start < i {
+                try!(writer.write_all(&bytes[start..i]));
+            }
+
+            try!(self.write_char_escape(writer, &bytes[i..], &mut skip));
+
+            start = i + 1;
+        }
+
+        if start != bytes.len() {
+            try!(writer.write_all(&bytes[start..]));
+        }
+
+        writer.write_all(b"\"")
+    }
+
+    /// Writes a full member string including starting and ending quotes
+    #[inline]
+    fn write_member_string<W: ?Sized>(&mut self, writer: &mut W, string: &str) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        self.write_string(writer, string)
     }
 
     /// Writes a character escape code to the specified writer.
@@ -1339,37 +1347,161 @@ pub trait Formatter {
     fn write_char_escape<W: ?Sized>(
         &mut self,
         writer: &mut W,
-        char_escape: CharEscape,
+        bytes: &[u8],
+        bytes_read: &mut usize,
     ) -> io::Result<()>
     where
         W: io::Write,
     {
-        use self::CharEscape::*;
+        let unicode_escape: [u8; 10];
+        static HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
 
-        let s = match char_escape {
-            Quote => b"\\\"",
-            ReverseSolidus => b"\\\\",
-            Solidus => b"\\/",
-            Backspace => b"\\b",
-            FormFeed => b"\\f",
-            LineFeed => b"\\n",
-            CarriageReturn => b"\\r",
-            Tab => b"\\t",
-            AsciiControl(byte) => {
-                static HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
-                let bytes = &[
+        let mut ch: u16 = bytes[0] as u16;
+
+        *bytes_read = 1;
+
+        if bytes.len() >= 2 {
+            ch <<= 8;
+            ch |= bytes[1] as u16;
+            *bytes_read = 2;
+        }
+
+        let escape: &[u8] = match ch {
+            0x7f...0x9f |
+            0xad |
+            0x0600...0x0604 |
+            0x070f |
+            0x17b4 |
+            0x17b5 |
+            0x200c...0x200f |
+            0x2028...0x202f |
+            0x2060...0x206f |
+            0xfeff |
+            0xfff0...0xffff => {
+                unicode_escape = [
                     b'\\',
                     b'u',
-                    b'0',
-                    b'0',
-                    HEX_DIGITS[(byte >> 4) as usize],
-                    HEX_DIGITS[(byte & 0xF) as usize],
+                    HEX_DIGITS[(ch >> 12) as usize],
+                    HEX_DIGITS[(ch >> 8 & 0b00001111) as usize],
+                    HEX_DIGITS[(ch >> 4 & 0b00001111) as usize],
+                    HEX_DIGITS[(ch & 0b00001111) as usize],
+                    0,0,0,0
                 ];
-                return writer.write_all(bytes);
+                &unicode_escape[0..6]
+            },
+            _ => {
+                *bytes_read = 1;
+
+                match ESCAPE[bytes[0] as usize] {
+                    BB => br"\b",
+                    TT => br"\t",
+                    NN => br"\n",
+                    FF => br"\f",
+                    RR => br"\r",
+                    QU => br#"\""#,
+                    BS => br"\\",
+                    U => {
+                        unicode_escape = [
+                            b'\\',
+                            b'u',
+                            b'0',
+                            b'0',
+                            HEX_DIGITS[(bytes[0] >> 4) as usize],
+                            HEX_DIGITS[(bytes[0] & 0b00001111) as usize],
+                            0,0,0,0
+                        ];
+                        &unicode_escape[0..6]
+                    }
+                    _ if (bytes[0] >> 5 == 0b110) && (bytes.len() >= 2) && (bytes[1] >> 6 == 0b10) => {
+                        *bytes_read = 2;
+
+                        let ch: u16 = ((bytes[0] as u16) & 0b00011111 << 6) | ((bytes[1] as u16) & 0b00111111);
+
+                        match ch {
+                            0x7f...0x9f |
+                            0xad |
+                            0x0600...0x0604 |
+                            0x070f |
+                            0x17b4 |
+                            0x17b5 |
+                            0x200c...0x200f |
+                            0x2028...0x202f |
+                            0x2060...0x206f |
+                            0xfeff |
+                            0xfff0...0xffff => {
+                                unicode_escape = [
+                                    b'\\',
+                                    b'u',
+                                    HEX_DIGITS[(ch >> 12) as usize],
+                                    HEX_DIGITS[(ch >> 8 & 0b00001111) as usize],
+                                    HEX_DIGITS[(ch >> 4 & 0b00001111) as usize],
+                                    HEX_DIGITS[(ch & 0b00001111) as usize],
+                                    0,0,0,0
+                                ];
+                                &unicode_escape[0..6]
+                            },
+                            _ => {
+                                &bytes[0..2]
+                            }
+                        }
+                    }
+                    _ if (bytes[0] >> 4 == 0b1110) && (bytes.len() >= 3) && (bytes[1] >> 6 == 0b10) && (bytes[2] >> 6 == 0b10) => {
+                        *bytes_read = 3;
+
+                        let ch: u16 = ((((bytes[0] << 4) | (bytes[1] >> 2 & 0b00001111)) as u16) << 8) | (((bytes[1] << 6 & 0b11000000) | (bytes[2] & 0b00111111)) as u16);
+
+                        match ch {
+                            0x7f...0x9f |
+                            0xad |
+                            0x0600...0x0604 |
+                            0x070f |
+                            0x17b4 |
+                            0x17b5 |
+                            0x200c...0x200f |
+                            0x2028...0x202f |
+                            0x2060...0x206f |
+                            0xfeff |
+                            0xfff0...0xffff => {
+                                unicode_escape = [
+                                    b'\\',
+                                    b'u',
+                                    HEX_DIGITS[(ch >> 12) as usize],
+                                    HEX_DIGITS[(ch >> 8 & 0b00001111) as usize],
+                                    HEX_DIGITS[(ch >> 4 & 0b00001111) as usize],
+                                    HEX_DIGITS[(ch & 0b00001111) as usize],
+                                    0,0,0,0
+                                ];
+                                &unicode_escape[0..6]
+                            },
+                            _ => {
+                                &bytes[0..3]
+                            }
+                        }
+                    }
+                    _ if (bytes[0] >> 3 == 0b11110) && (bytes.len() >= 4) && (bytes[1] >> 6 == 0b10) && (bytes[2] >> 6 == 0b10) && (bytes[3] >> 6 == 0b10) => {
+                        *bytes_read = 4;
+                        unicode_escape = [
+                            b'\\',
+                            b'u',
+                            b'{',
+                            HEX_DIGITS[(bytes[0] >> 2 & 0b00000001) as usize],
+                            HEX_DIGITS[((bytes[0] << 2 & 0b00001100) | (bytes[1] >> 4 & 0b00000011)) as usize],
+                            HEX_DIGITS[(bytes[1] & 0b00001111) as usize],
+                            HEX_DIGITS[(bytes[2] >> 2 & 0b00001111) as usize],
+                            HEX_DIGITS[((bytes[2] << 2 & 0b00001100) | (bytes[3] >> 4 & 0b00000011)) as usize],
+                            HEX_DIGITS[(bytes[3] & 0b00001111) as usize],
+                            b'}'
+                        ];
+                        &unicode_escape[0..]
+                    }
+                    _ => {
+                        &bytes[0..1]
+                    }
+                }
             }
         };
 
-        writer.write_all(s)
+        writer.write_all(escape)
     }
 
     /// Called before every array.  Writes a `[` to the specified
@@ -1491,7 +1623,9 @@ impl Formatter for CompactFormatter {}
 pub struct PrettyFormatter<'a> {
     current_indent: usize,
     has_value: bool,
+    in_object: bool,
     indent: &'a [u8],
+    next_bracket: Option<u8>,
 }
 
 impl<'a> PrettyFormatter<'a> {
@@ -1505,8 +1639,31 @@ impl<'a> PrettyFormatter<'a> {
         PrettyFormatter {
             current_indent: 0,
             has_value: false,
+            in_object: false,
             indent: indent,
+            next_bracket: None,
         }
+    }
+
+    fn try_write_bracket<W: ?Sized>(&mut self, writer: &mut W) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        if let Some(bracket) = self.next_bracket {
+            if self.in_object {
+                try!(writer.write_all(b"\n"));
+                try!(indent(writer, self.current_indent, self.indent));
+                self.in_object = false;
+            }
+
+            self.current_indent += 1;
+            self.has_value = false;
+            self.next_bracket = None;
+
+            try!(writer.write_all(&[bracket]));
+        }
+
+        Ok(())
     }
 }
 
@@ -1518,13 +1675,387 @@ impl<'a> Default for PrettyFormatter<'a> {
 
 impl<'a> Formatter for PrettyFormatter<'a> {
     #[inline]
-    fn begin_array<W: ?Sized>(&mut self, writer: &mut W) -> io::Result<()>
+    fn write_null<W: ?Sized>(&mut self, writer: &mut W) -> io::Result<()>
     where
         W: io::Write,
     {
-        self.current_indent += 1;
-        self.has_value = false;
-        writer.write_all(b"[")
+        if self.in_object {
+            try!(writer.write_all(b" "));
+            self.in_object = false;
+        }
+
+        writer.write_all(b"null")
+    }
+
+    #[inline]
+    fn write_bool<W: ?Sized>(&mut self, writer: &mut W, value: bool) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        if self.in_object {
+            try!(writer.write_all(b" "));
+            self.in_object = false;
+        }
+
+        let s = if value {
+            b"true" as &[u8]
+        } else {
+            b"false" as &[u8]
+        };
+        writer.write_all(s)
+    }
+
+    #[inline]
+    fn write_i8<W: ?Sized>(&mut self, writer: &mut W, value: i8) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        if self.in_object {
+            try!(writer.write_all(b" "));
+            self.in_object = false;
+        }
+
+        itoa::write(writer, value).map(|_| ())
+    }
+
+    #[inline]
+    fn write_i16<W: ?Sized>(&mut self, writer: &mut W, value: i16) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        if self.in_object {
+            try!(writer.write_all(b" "));
+            self.in_object = false;
+        }
+
+        itoa::write(writer, value).map(|_| ())
+    }
+
+    #[inline]
+    fn write_i32<W: ?Sized>(&mut self, writer: &mut W, value: i32) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        if self.in_object {
+            try!(writer.write_all(b" "));
+            self.in_object = false;
+        }
+
+        itoa::write(writer, value).map(|_| ())
+    }
+
+    #[inline]
+    fn write_i64<W: ?Sized>(&mut self, writer: &mut W, value: i64) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        if self.in_object {
+            try!(writer.write_all(b" "));
+            self.in_object = false;
+        }
+
+        itoa::write(writer, value).map(|_| ())
+    }
+
+    #[inline]
+    fn write_u8<W: ?Sized>(&mut self, writer: &mut W, value: u8) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        if self.in_object {
+            try!(writer.write_all(b" "));
+            self.in_object = false;
+        }
+
+        itoa::write(writer, value).map(|_| ())
+    }
+
+    #[inline]
+    fn write_u16<W: ?Sized>(&mut self, writer: &mut W, value: u16) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        if self.in_object {
+            try!(writer.write_all(b" "));
+            self.in_object = false;
+        }
+
+        itoa::write(writer, value).map(|_| ())
+    }
+
+    #[inline]
+    fn write_u32<W: ?Sized>(&mut self, writer: &mut W, value: u32) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        if self.in_object {
+            try!(writer.write_all(b" "));
+            self.in_object = false;
+        }
+
+        itoa::write(writer, value).map(|_| ())
+    }
+
+    #[inline]
+    fn write_u64<W: ?Sized>(&mut self, writer: &mut W, value: u64) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        if self.in_object {
+            try!(writer.write_all(b" "));
+            self.in_object = false;
+        }
+
+        itoa::write(writer, value).map(|_| ())
+    }
+
+    #[inline]
+    fn write_f32<W: ?Sized>(&mut self, writer: &mut W, value: f32) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        if self.in_object {
+            try!(writer.write_all(b" "));
+            self.in_object = false;
+        }
+
+        dtoa::write(writer, value).map(|_| ())
+    }
+
+    #[inline]
+    fn write_f64<W: ?Sized>(&mut self, writer: &mut W, value: f64) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        if self.in_object {
+            try!(writer.write_all(b" "));
+            self.in_object = false;
+        }
+
+        dtoa::write(writer, value).map(|_| ())
+    }
+
+    #[inline]
+    fn begin_string<W: ?Sized>(&mut self, writer: &mut W) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        if self.in_object {
+            try!(writer.write_all(b" "));
+            self.in_object = false;
+        }
+
+        writer.write_all(b"\"")
+    }
+
+    #[inline]
+    fn end_string<W: ?Sized>(&mut self, writer: &mut W) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        writer.write_all(b"\"")
+    }
+
+    #[inline]
+    fn write_string<W: ?Sized>(&mut self, writer: &mut W, string: &str) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        enum StringKind {
+            Unquoted,
+            DoubleQuoted,
+            TripleQuoted,
+            MultilineTripleQuoted,
+        }
+
+        // Use regexes to determine the kind of string to write
+        let kind: StringKind = {
+            if RE_VALUE.is_match(string) || !RE_STR_NONE.is_match(string) {
+                if !RE_STR_DOUBLE.is_match(string) {
+                    if RE_HAS_NEWLINE.is_match(string) {
+                        if !RE_STR_MULTILINE.is_match(string) {
+                            StringKind::DoubleQuoted
+                        } else {
+                            StringKind::MultilineTripleQuoted
+                        }
+                    } else {
+                        StringKind::TripleQuoted
+                    }
+                } else {
+                    StringKind::DoubleQuoted
+                }
+            } else {
+                StringKind::Unquoted
+            }
+        };
+
+
+        match kind {
+            // Write the string verbatim
+            StringKind::Unquoted => {
+                if self.in_object {
+                    try!(writer.write_all(b" "));
+                    self.in_object = false;
+                }
+
+                writer.write_all(string.as_bytes())
+            }
+            // Write the string as a JSON string
+            StringKind::DoubleQuoted => {
+                if self.in_object {
+                    try!(writer.write_all(b" "));
+                    self.in_object = false;
+                }
+
+                try!(writer.write_all(b"\""));
+
+                let bytes = string.as_bytes();
+
+                let mut start = 0;
+                let mut skip = 0;
+
+                for(i, &byte) in bytes.iter().enumerate() {
+                    if skip > 1 {
+                        skip -= 1;
+                        start = i + 1;
+                        continue;
+                    }
+
+                    let escape = ESCAPE[byte as usize];
+                    if escape == 0 {
+                        continue;
+                    }
+
+                    if start < i {
+                        try!(writer.write_all(&bytes[start..i]));
+                    }
+
+                    try!(self.write_char_escape(writer, &bytes[i..], &mut skip));
+
+                    start = i + 1;
+                }
+
+                if start != bytes.len() {
+                    try!(writer.write_all(&bytes[start..]));
+                }
+
+                writer.write_all(b"\"")
+            }
+            // Write the string wrapped in triple-apostraphes with no escapes
+            StringKind::TripleQuoted => {
+                if self.in_object {
+                    try!(writer.write_all(b" "));
+                    self.in_object = false;
+                }
+
+                try!(writer.write_all(b"'''"));
+
+                try!(writer.write_all(string.as_bytes()));
+
+                writer.write_all(b"'''")
+            }
+            // Write the string at the proper indentation level
+            StringKind::MultilineTripleQuoted => {
+                if self.in_object {
+                    self.current_indent += 1;
+
+                    try!(writer.write_all(b"\n"));
+                    try!(indent(writer, self.current_indent, self.indent));
+                }
+                try!(writer.write_all(b"'''\n"));
+
+
+                let bytes = string.as_bytes();
+
+                let mut start = 0;
+                let mut has_content = false;
+                let mut has_newline = false;
+
+                for(i, &byte) in bytes.iter().enumerate() {
+                    if byte == b'\n' {
+                        if has_content {
+                            try!(indent(writer, self.current_indent, self.indent));
+                            try!(writer.write_all(&bytes[start..i + 1]));
+                        } else {
+                            try!(writer.write_all(b"\n"));
+                        }
+
+                        start = i + 1;
+                        has_content = false;
+                        has_newline = true;
+                    } else if byte == b'\t' || byte == b' ' || byte == b'\r' {
+                        has_content = true;
+                    }
+                }
+
+                if start != bytes.len() {
+                    try!(indent(writer, self.current_indent, self.indent));
+                    try!(writer.write_all(&bytes[start..]));
+                }
+                if has_newline {
+                    try!(writer.write_all(b"\n"));
+                }
+
+                try!(indent(writer, self.current_indent, self.indent));
+                self.current_indent -= 1;
+                writer.write_all(b"'''")
+            }
+        }
+    }
+
+    #[inline]
+    fn write_member_string<W: ?Sized>(&mut self, writer: &mut W, string: &str) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        if RE_MEMBER_NONE.is_match(string) {
+            // Unquoted
+            writer.write_all(string.as_bytes())
+        } else {
+            // Double quoted
+            try!(writer.write_all(b"\""));
+
+            let bytes = string.as_bytes();
+
+            let mut skip = 0;
+            let mut start = 0;
+
+            for(i, &byte) in bytes.iter().enumerate() {
+                if skip > 1 {
+                    skip -= 1;
+                    start = i + 1;
+                    continue;
+                }
+
+                let escape = ESCAPE[byte as usize];
+                if escape == 0 {
+                    continue;
+                }
+
+                if start < i {
+                    try!(writer.write_all(&bytes[start..i]));
+                }
+
+                try!(self.write_char_escape(writer, &bytes[i..], &mut skip));
+
+                start = i + 1;
+            }
+
+            if start != bytes.len() {
+                try!(writer.write_all(&bytes[start..]));
+            }
+
+            writer.write_all(b"\"")
+        }
+    }
+
+    #[inline]
+    fn begin_array<W: ?Sized>(&mut self, _writer: &mut W) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        self.next_bracket = Some(b'[');
+        Ok(())
     }
 
     #[inline]
@@ -1532,26 +2063,35 @@ impl<'a> Formatter for PrettyFormatter<'a> {
     where
         W: io::Write,
     {
-        self.current_indent -= 1;
+        if let Some(_) = self.next_bracket {
+            self.next_bracket = None;
 
-        if self.has_value {
-            try!(writer.write_all(b"\n"));
-            try!(indent(writer, self.current_indent, self.indent));
+            if self.in_object {
+                try!(writer.write_all(b" "));
+            }
+
+            writer.write_all(b"[]")
+        } else {
+            self.current_indent -= 1;
+
+            if self.has_value {
+                try!(writer.write_all(b"\n"));
+                try!(indent(writer, self.current_indent, self.indent));
+            }
+
+            writer.write_all(b"]")
         }
-
-        writer.write_all(b"]")
     }
 
     #[inline]
-    fn begin_array_value<W: ?Sized>(&mut self, writer: &mut W, first: bool) -> io::Result<()>
+    fn begin_array_value<W: ?Sized>(&mut self, writer: &mut W, _first: bool) -> io::Result<()>
     where
         W: io::Write,
     {
-        if first {
-            try!(writer.write_all(b"\n"));
-        } else {
-            try!(writer.write_all(b",\n"));
-        }
+        try!(self.try_write_bracket(writer));
+
+        self.in_object = false;
+        try!(writer.write_all(b"\n"));
         try!(indent(writer, self.current_indent, self.indent));
         Ok(())
     }
@@ -1566,13 +2106,12 @@ impl<'a> Formatter for PrettyFormatter<'a> {
     }
 
     #[inline]
-    fn begin_object<W: ?Sized>(&mut self, writer: &mut W) -> io::Result<()>
+    fn begin_object<W: ?Sized>(&mut self, _writer: &mut W) -> io::Result<()>
     where
         W: io::Write,
     {
-        self.current_indent += 1;
-        self.has_value = false;
-        writer.write_all(b"{")
+        self.next_bracket = Some(b'{');
+        Ok(())
     }
 
     #[inline]
@@ -1580,26 +2119,33 @@ impl<'a> Formatter for PrettyFormatter<'a> {
     where
         W: io::Write,
     {
-        self.current_indent -= 1;
+        if let Some(_) = self.next_bracket {
+            self.next_bracket = None;
 
-        if self.has_value {
-            try!(writer.write_all(b"\n"));
-            try!(indent(writer, self.current_indent, self.indent));
+            if self.in_object {
+                try!(writer.write_all(b" "));
+            }
+
+            writer.write_all(b"{}")
+        } else {
+            self.current_indent -= 1;
+
+            if self.has_value {
+                try!(writer.write_all(b"\n"));
+                try!(indent(writer, self.current_indent, self.indent));
+            }
+
+            writer.write_all(b"}")
         }
-
-        writer.write_all(b"}")
     }
 
     #[inline]
-    fn begin_object_key<W: ?Sized>(&mut self, writer: &mut W, first: bool) -> io::Result<()>
+    fn begin_object_key<W: ?Sized>(&mut self, writer: &mut W, _first: bool) -> io::Result<()>
     where
         W: io::Write,
     {
-        if first {
-            try!(writer.write_all(b"\n"));
-        } else {
-            try!(writer.write_all(b",\n"));
-        }
+        try!(self.try_write_bracket(writer));
+        try!(writer.write_all(b"\n"));
         indent(writer, self.current_indent, self.indent)
     }
 
@@ -1608,7 +2154,9 @@ impl<'a> Formatter for PrettyFormatter<'a> {
     where
         W: io::Write,
     {
-        writer.write_all(b": ")
+        self.in_object = true;
+
+        writer.write_all(b":")
     }
 
     #[inline]
@@ -1630,46 +2178,7 @@ where
     W: io::Write,
     F: Formatter,
 {
-    try!(formatter.begin_string(writer));
-    try!(format_escaped_str_contents(writer, formatter, value));
-    try!(formatter.end_string(writer));
-    Ok(())
-}
-
-fn format_escaped_str_contents<W: ?Sized, F: ?Sized>(
-    writer: &mut W,
-    formatter: &mut F,
-    value: &str,
-) -> io::Result<()>
-where
-    W: io::Write,
-    F: Formatter,
-{
-    let bytes = value.as_bytes();
-
-    let mut start = 0;
-
-    for (i, &byte) in bytes.iter().enumerate() {
-        let escape = ESCAPE[byte as usize];
-        if escape == 0 {
-            continue;
-        }
-
-        if start < i {
-            try!(formatter.write_string_fragment(writer, &value[start..i]));
-        }
-
-        let char_escape = CharEscape::from_escape_table(escape, byte);
-        try!(formatter.write_char_escape(writer, char_escape));
-
-        start = i + 1;
-    }
-
-    if start != bytes.len() {
-        try!(formatter.write_string_fragment(writer, &value[start..]));
-    }
-
-    Ok(())
+    formatter.write_string(writer, value)
 }
 
 const BB: u8 = b'b'; // \x08
@@ -1680,28 +2189,29 @@ const RR: u8 = b'r'; // \x0D
 const QU: u8 = b'"'; // \x22
 const BS: u8 = b'\\'; // \x5C
 const U: u8 = b'u'; // \x00...\x1F except the ones above
+const UU: u8 = 1; // Any characters that may possibly be a unicode escape
 
 // Lookup table of escape sequences. A value of b'x' at index i means that byte
 // i is escaped as "\x" in JSON. A value of 0 means that byte i is not escaped.
 #[cfg_attr(rustfmt, rustfmt_skip)]
 static ESCAPE: [u8; 256] = [
     //  1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
-    U,  U,  U,  U,  U,  U,  U,  U, BB, TT, NN,  U, FF, RR,  U,  U, // 0
-    U,  U,  U,  U,  U,  U,  U,  U,  U,  U,  U,  U,  U,  U,  U,  U, // 1
-    0,  0, QU,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // 2
-    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // 3
-    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // 4
-    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, BS,  0,  0,  0, // 5
-    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // 6
-    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // 7
-    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // 8
-    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // 9
-    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // A
-    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // B
-    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // C
-    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // D
-    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // E
-    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // F
+    U,  U,  U,  U,  U,  U,  U,  U, BB, TT, NN,  U, FF, RR,  U,  U,  // 0
+    U,  U,  U,  U,  U,  U,  U,  U,  U,  U,  U,  U,  U,  U,  U,  U,  // 1
+    0,  0, QU,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  // 2
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  // 3
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  // 4
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, BS,  0,  0,  0,  // 5
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  // 6
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  // 7
+    UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, // 8
+    UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, // 9
+    UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, // A
+    UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, // B
+    UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, // C
+    UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, // D
+    UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, // E
+    UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, UU, // F
 ];
 
 /// Serialize the given data structure as JSON into the IO stream.

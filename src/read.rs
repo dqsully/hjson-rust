@@ -68,7 +68,7 @@ pub trait Read<'de>: private::Sealed {
     /// string until the next quotation mark using the given scratch space if
     /// necessary. The scratch space is initially empty.
     #[doc(hidden)]
-    fn parse_single_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'de, 's, str>>;
+    fn parse_single_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>, indent_level: usize) -> Result<Reference<'de, 's, str>>;
 
     /// Parses a string until the next newline
     #[doc(hidden)]
@@ -100,6 +100,7 @@ pub trait Read<'de>: private::Sealed {
     fn parse_single_str_raw<'s>(
         &'s mut self,
         scratch: &'s mut Vec<u8>,
+        indent_level: usize,
     ) -> Result<Reference<'de, 's, [u8]>>;
 
     /// Parses a string until the next newline
@@ -258,11 +259,13 @@ where
         scratch: &'s mut Vec<u8>,
         validate: bool,
         result: F,
+        indent_level: usize,
     ) -> Result<T>
     where
         T: 's,
         F: FnOnce(&'s Self, &'s [u8]) -> Result<T>,
     {
+        // TODO keep track of indentation level and subtract spaces/tabs
         debug!(parse_single_str_bytes);
 
         let mut beginning = true;
@@ -339,6 +342,19 @@ where
             if ch != b'\n' && ch != b'\r' {
                 scratch.push(ch);
             } else {
+                let mut trailing_whitespace = 0;
+
+                for i in (0..scratch.len()).rev() {
+                    if is_whitespace(scratch[i]) {
+                        trailing_whitespace += 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                let len = scratch.len();
+                scratch.truncate(len - trailing_whitespace);
+
                 return result(self, scratch);
             }
         }
@@ -430,8 +446,8 @@ where
             .map(Reference::Copied)
     }
 
-    fn parse_single_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'de, 's, str>> {
-        self.parse_single_str_bytes(scratch, true, as_str)
+    fn parse_single_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>, indent_level: usize) -> Result<Reference<'de, 's, str>> {
+        self.parse_single_str_bytes(scratch, true, as_str, indent_level)
             .map(Reference::Copied)
     }
 
@@ -456,8 +472,9 @@ where
     fn parse_single_str_raw<'s>(
         &'s mut self,
         scratch: &'s mut Vec<u8>,
+        indent_level: usize,
     ) -> Result<Reference<'de, 's, [u8]>> {
-        self.parse_single_str_bytes(scratch, false, |_, bytes| Ok(bytes))
+        self.parse_single_str_bytes(scratch, false, |_, bytes| Ok(bytes), indent_level)
             .map(Reference::Copied)
     }
 
@@ -635,6 +652,7 @@ impl<'a> SliceRead<'a> {
         scratch: &'s mut Vec<u8>,
         validate: bool,
         result: F,
+        indent_level: usize,
     ) -> Result<Reference<'a, 's, T>>
     where
         T: 's,
@@ -646,10 +664,30 @@ impl<'a> SliceRead<'a> {
 
         let mut beginning = true;
         let mut multiline = false;
+        let mut in_indent = false;
+        let mut indent_count = 0;
+        let mut was_newline = 0;
 
         loop {
+            // Skip the indentations
+            if multiline && in_indent {
+                while
+                    indent_count + 1 < indent_level &&
+                    (
+                        self.slice[self.index] == b' ' ||
+                        self.slice[self.index] == b'\t'
+                    )
+                {
+                    self.index += 1;
+                    start += 1;
+                    indent_count += 1;
+                }
+                indent_count = 0;
+                in_indent = false;
+            }
             while self.index < self.slice.len() && !ESCAPE_SINGLE[self.slice[self.index] as usize] {
                 self.index += 1;
+                was_newline = 0;
             }
             if self.index == self.slice.len() {
                 return error(self, ErrorCode::EofWhileParsingString);
@@ -661,9 +699,41 @@ impl<'a> SliceRead<'a> {
                         self.index + 1 < self.slice.len() &&
                         self.slice[self.index + 1] == b'\''
                     {
+                        // Begin parsing the string as multiline
+
                         multiline = true;
                         self.index += 2;
                         start += 2;
+
+                        let mut newline = false;
+                        // Skip the beginning newline and whitespace if there is any
+                        loop {
+                            if indent_count >= indent_level {
+                                break;
+                            }
+
+                            match self.slice[self.index] {
+                                b'\t' | b'\r' | b' ' => {
+                                    self.index += 1;
+                                    start += 1;
+
+                                    if newline {
+                                        indent_count += 1;
+                                    }
+                                }
+                                b'\n' => {
+                                    if !newline {
+                                        newline = true;
+                                        self.index += 1;
+                                        start += 1;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                _ => break,
+                            }
+                        }
+                        indent_count = 0;
                     } else if
                         (
                             multiline &&
@@ -673,23 +743,32 @@ impl<'a> SliceRead<'a> {
                         ) ||
                         !multiline
                     {
+                        // End parsing the string
+
                         if scratch.is_empty() {
                             // Fast path: return a slice of the raw JSON without any
                             // copying.
-                            let borrowed = &self.slice[start..self.index];
+                            let borrowed = &self.slice[start..self.index - was_newline];
                             self.index += if multiline {3} else {1};
+
                             return result(self, borrowed).map(Reference::Borrowed);
                         } else {
-                            scratch.extend_from_slice(&self.slice[start..self.index]);
+                            if self.index - was_newline > start {
+                                scratch.extend_from_slice(&self.slice[start..self.index - was_newline]);
+                            } else if was_newline > 0 {
+                                scratch.pop();
+                            }
                             // "as &[u8]" is required for rustc 1.8.0
                             let copied = scratch as &[u8];
                             self.index += if multiline {3} else {1};
+
                             return result(self, copied).map(Reference::Copied);
                         }
                     } else {
                         self.index += 1;
                     }
                 }
+
                 b'\\' => if !multiline {
                     scratch.extend_from_slice(&self.slice[start..self.index]);
                     self.index += 1;
@@ -698,11 +777,17 @@ impl<'a> SliceRead<'a> {
                 } else {
                     self.index += 1;
                 }
+
                 b'\n' => if !multiline {
                     return error(self, ErrorCode::UnexpectedNewline);
                 } else {
+                    scratch.extend_from_slice(&self.slice[start..self.index + 1]);
                     self.index += 1;
+                    start = self.index;
+                    in_indent = true;
+                    was_newline = 1;
                 }
+
                 _ => {
                     if validate {
                         return error(self, ErrorCode::InvalidUnicodeCodePoint);
@@ -738,9 +823,19 @@ impl<'a> SliceRead<'a> {
             self.index += 1;
         }
 
+        let mut trailing_whitespace = 0;
+
+        for i in (start..self.index).rev() {
+            if is_whitespace(self.slice[i]) {
+                trailing_whitespace += 1;
+            } else {
+                break;
+            }
+        }
+
         // Fast path: return a slice of the raw JSON without any
         // copying.
-        let borrowed = &self.slice[start..self.index];
+        let borrowed = &self.slice[start..self.index - trailing_whitespace];
         return result(self, borrowed).map(Reference::Borrowed);
     }
 
@@ -834,8 +929,8 @@ impl<'a> Read<'a> for SliceRead<'a> {
         self.parse_double_str_bytes(scratch, true, as_str)
     }
 
-    fn parse_single_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'a, 's, str>> {
-        self.parse_single_str_bytes(scratch, true, as_str)
+    fn parse_single_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>, indent_level: usize) -> Result<Reference<'a, 's, str>> {
+        self.parse_single_str_bytes(scratch, true, as_str, indent_level)
     }
 
     fn parse_none_str<'s>(&'s mut self, _: &'s mut Vec<u8>) -> Result<Reference<'a, 's, str>> {
@@ -856,8 +951,9 @@ impl<'a> Read<'a> for SliceRead<'a> {
     fn parse_single_str_raw<'s>(
         &'s mut self,
         scratch: &'s mut Vec<u8>,
+        indent_level: usize,
     ) -> Result<Reference<'a, 's, [u8]>> {
-        self.parse_single_str_bytes(scratch, false, |_, bytes| Ok(bytes))
+        self.parse_single_str_bytes(scratch, false, |_, bytes| Ok(bytes), indent_level)
     }
 
     fn parse_none_str_raw<'s>(
@@ -1007,14 +1103,14 @@ impl<'a> Read<'a> for StrRead<'a> {
             )
     }
 
-    fn parse_single_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>) -> Result<Reference<'a, 's, str>> {
+    fn parse_single_str<'s>(&'s mut self, scratch: &'s mut Vec<u8>, indent_level: usize) -> Result<Reference<'a, 's, str>> {
         self.delegate
             .parse_single_str_bytes(
                 scratch, true, |_, bytes| {
                     // The input is assumed to be valid UTF-8 and the \u-escapes are
                     // checked along the way, so don't need to check here.
                     Ok(unsafe { str::from_utf8_unchecked(bytes) })
-                }
+                }, indent_level
             )
     }
 
@@ -1050,8 +1146,9 @@ impl<'a> Read<'a> for StrRead<'a> {
     fn parse_single_str_raw<'s>(
         &'s mut self,
         scratch: &'s mut Vec<u8>,
+        indent_level: usize,
     ) -> Result<Reference<'a, 's, [u8]>> {
-        self.delegate.parse_single_str_raw(scratch)
+        self.delegate.parse_single_str_raw(scratch, indent_level)
     }
 
     fn parse_none_str_raw<'s>(

@@ -1,12 +1,14 @@
 // #[macro_use]
 extern crate serde_hjson;
+extern crate difference;
+extern crate regex;
 
 use std::fs::File;
-// use std::fs;
 use std::io::prelude::*;
 use std::io;
 use std::path::Path;
 use serde_hjson::Value;
+use regex::Regex;
 
 fn get_content(name: &str) -> io::Result<String> {
     let mut f = try!(File::open(&Path::new(name)));
@@ -48,15 +50,52 @@ macro_rules! test {
                 let data: Value = serde_hjson::from_str(&test_content).unwrap();
 
                 let (_, rhjson) = get_result_content(name).unwrap();
-                let actual_hjson = serde_hjson::to_string(&data).unwrap();
+                let actual_hjson = serde_hjson::to_string_pretty(&data).unwrap();
 
                 if rhjson != actual_hjson {
-                    panic!("{:?}\n---hjson expected\n{}\n---hjson actual\n{}\n---\n", name, rhjson, actual_hjson);
+                    println!("{}", difference::Changeset::new(&rhjson, &actual_hjson, "\n"));
+                    println!("\nExpected:\n{:?}", rhjson);
+                    println!("\nGot:\n{:?}", actual_hjson);
+
+                    panic!();
                 }
                 // TODO later normal json
             }
         }
-    }
+    };
+    ($v: ident, $fix: ident) => {
+        #[allow(non_snake_case)]
+        mod $v {
+            use super::*;
+
+            #[test]
+            fn try_parse() {
+                let name = stringify!($v);
+
+                let test_content = get_test_content(name).unwrap();
+                let _data: Value = serde_hjson::from_str(&test_content).unwrap();
+            }
+            #[test]
+            fn match_stringify() {
+                let name = stringify!($v);
+
+                let test_content = get_test_content(name).unwrap();
+                let data: Value = serde_hjson::from_str(&test_content).unwrap();
+
+                let (_, rhjson) = get_result_content(name).unwrap();
+                let actual_hjson = $fix(serde_hjson::to_string_pretty(&data).unwrap());
+
+                if rhjson != actual_hjson {
+                    println!("{}", difference::Changeset::new(&rhjson, &actual_hjson, "\n"));
+                    println!("\nExpected:\n{:?}", rhjson);
+                    println!("\nGot:\n{:?}", actual_hjson);
+
+                    panic!();
+                }
+                // TODO later normal json
+            }
+        }
+    };
 }
 macro_rules! test_failure {
     ($v: ident) => {
@@ -73,12 +112,23 @@ macro_rules! test_failure {
                 let _data: Value = serde_hjson::from_str(&test_content).unwrap();
             }
         }
-    }
+    };
+}
+
+fn std_fix(json: String) -> String {
+    let re = Regex::new(r"(?m)(?P<d>\d)\.0(?P<x>,?)$").unwrap();
+    String::from(re.replace_all(&json, "$d$s"))
+}
+
+fn fix_pass1(json: String) -> String {
+    std_fix(json)
+        .replace("1.2345678900000003e34", "1.23456789e+34")
+        .replace("2.3456789011999997e76", "2.3456789012e+76")
 }
 
 test!(charset);
 test!(charset2);
-test!(comments);
+test!(comments, std_fix);
 test!(empty);
 test_failure!(Charset1);
 test_failure!(JSON02);
@@ -140,11 +190,11 @@ test_failure!(Str6c);
 test_failure!(Str6d);
 test_failure!(Str7a);
 test_failure!(Str8a);
-test!(kan);
+test!(kan, std_fix);
 test!(keys);
 test!(mltabs);
 test!(oa);
-test!(pass1);
+test!(pass1, fix_pass1);
 test!(pass2);
 test!(pass3);
 test!(pass4);

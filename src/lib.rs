@@ -347,6 +347,9 @@ extern crate itoa;
 extern crate dtoa;
 #[cfg(feature = "preserve_order")]
 extern crate linked_hash_map;
+extern crate regex;
+#[macro_use]
+extern crate lazy_static;
 
 #[doc(inline)]
 pub use self::de::{Deserializer, StreamDeserializer, from_reader, from_slice, from_str};
