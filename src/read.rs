@@ -265,25 +265,70 @@ where
         T: 's,
         F: FnOnce(&'s Self, &'s [u8]) -> Result<T>,
     {
-        // TODO keep track of indentation level and subtract spaces/tabs
         debug!(parse_single_str_bytes);
 
         let mut beginning = true;
         let mut multiline = false;
+        let mut in_indent = false;
+        let mut indent_count = 0;
+        let mut was_newline = false;
 
         loop {
             let ch = try!(next_or_eof(self));
+            // Skip the indentations
+            if multiline && in_indent && indent_count + 1 < indent_level && ch == b' ' || ch == b'\t' {
+                indent_count += 1;
+                continue;
+            }
+
+            in_indent = false;
+
             if !ESCAPE_SINGLE[ch as usize] {
+                beginning = false;
                 scratch.push(ch);
                 continue;
             }
+
             match ch {
                 b'\'' => {
                     if beginning {
+                        // The first apostrophe has already been consumed - we only need to match two more
                         if let Ok(Some(b'\'')) = self.peek() {
                             multiline = true;
+
                             // Consume char
                             try!(next_or_eof(self));
+
+                            let mut newline = false;
+                            // Skip the beginning newline and whitespace if there is any
+                            loop {
+                                if indent_count >= indent_level {
+                                    break;
+                                }
+
+                                match try!(self.peek().map_err(Error::io)) {
+                                    Some(b'\t') | Some(b'\r') | Some(b' ') => {
+                                        // Consume char
+                                        try!(next_or_eof(self));
+
+                                        if newline {
+                                            indent_count += 1;
+                                        }
+                                    }
+                                    Some(b'\n') => {
+                                        if !newline {
+                                            newline = true;
+
+                                            // Consume char
+                                            try!(next_or_eof(self));
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            indent_count = 0;
                         } else {
                             // Scratch is empty at this point
                             return result(self, scratch);
@@ -297,6 +342,11 @@ where
                                 // Consume char
                                 try!(next_or_eof(self));
 
+                                // Take off the trailing newline if necessary
+                                if was_newline {
+                                    scratch.pop();
+                                }
+
                                 return result(self, scratch);
                             } else {
                                 scratch.push(b'\'');
@@ -309,11 +359,21 @@ where
                         return result(self, scratch);
                     }
                 }
+
                 b'\\' => if !multiline {
                     try!(parse_escape(self, scratch));
+                } else {
+                    scratch.push(ch);
                 }
+
                 b'\n' => if !multiline {
                     return error(self, ErrorCode::UnexpectedNewline);
+                } else {
+                    scratch.push(ch);
+
+                    in_indent = true;
+                    was_newline = true;
+                    indent_count = 0;
                 }
                 _ => {
                     if validate {
@@ -688,6 +748,7 @@ impl<'a> SliceRead<'a> {
             while self.index < self.slice.len() && !ESCAPE_SINGLE[self.slice[self.index] as usize] {
                 self.index += 1;
                 was_newline = 0;
+                beginning = false;
             }
             if self.index == self.slice.len() {
                 return error(self, ErrorCode::EofWhileParsingString);
