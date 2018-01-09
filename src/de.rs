@@ -1459,7 +1459,13 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
                     Reference::Copied(s) => visitor.visit_str(s),
                 }
             }
-            _ => Err(self.peek_invalid_type(&visitor)),
+            _ => {
+                self.str_buf.clear();
+                match try!(self.read.parse_none_str(&mut self.str_buf)) {
+                    Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
+                    Reference::Copied(s) => visitor.visit_str(s),
+                }
+            }
         };
 
         match value {
@@ -1590,7 +1596,13 @@ impl<'de, 'a, R: Read<'de>> de::Deserializer<'de> for &'a mut Deserializer<R> {
                 }
             }
             b'[' => self.deserialize_seq(visitor),
-            _ => Err(self.peek_invalid_type(&visitor)),
+            _ => {
+                self.str_buf.clear();
+                match try!(self.read.parse_none_str(&mut self.str_buf)) {
+                    Reference::Borrowed(s) => visitor.visit_borrowed_str(s),
+                    Reference::Copied(s) => visitor.visit_str(s),
+                }
+            }
         };
 
         match value {

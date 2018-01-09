@@ -276,7 +276,7 @@ where
         loop {
             let ch = try!(next_or_eof(self));
             // Skip the indentations
-            if multiline && in_indent && indent_count + 1 < indent_level && ch == b' ' || ch == b'\t' {
+            if multiline && in_indent && indent_count < indent_level && ch == b' ' || ch == b'\t' {
                 indent_count += 1;
                 continue;
             }
@@ -285,6 +285,7 @@ where
 
             if !ESCAPE_SINGLE[ch as usize] {
                 beginning = false;
+                was_newline = false;
                 scratch.push(ch);
                 continue;
             }
@@ -306,8 +307,8 @@ where
                                     break;
                                 }
 
-                                match try!(self.peek().map_err(Error::io)) {
-                                    Some(b'\t') | Some(b'\r') | Some(b' ') => {
+                                match try!(peek_or_eof(self)) {
+                                    b'\t' | b'\r' | b' ' => {
                                         // Consume char
                                         try!(next_or_eof(self));
 
@@ -315,7 +316,7 @@ where
                                             indent_count += 1;
                                         }
                                     }
-                                    Some(b'\n') => {
+                                    b'\n' => {
                                         if !newline {
                                             newline = true;
 
@@ -362,8 +363,10 @@ where
 
                 b'\\' => if !multiline {
                     try!(parse_escape(self, scratch));
+                    was_newline = false;
                 } else {
                     scratch.push(ch);
+                    was_newline = false;
                 }
 
                 b'\n' => if !multiline {
@@ -380,6 +383,7 @@ where
                         return error(self, ErrorCode::InvalidUnicodeCodePoint);
                     }
                     scratch.push(ch);
+                    was_newline = false;
                 }
             }
 
@@ -398,9 +402,9 @@ where
     {
         debug!(parse_none_str_bytes);
         loop {
-            let ch = try!(next_or_eof(self));
-            if ch != b'\n' && ch != b'\r' {
-                scratch.push(ch);
+            let ch = try!(self.peek().map_err(Error::io));
+            if ch != Some(b'\n') && ch != Some(b'\r') && ch != None {
+                scratch.push(try!(next_or_eof(self)));
             } else {
                 let mut trailing_whitespace = 0;
 
@@ -431,9 +435,9 @@ where
     {
         debug!(parse_member_name_bytes);
         loop {
-            let ch = try!(next_or_eof(self));
+            let ch = try!(peek_or_eof(self));
             if !is_whitespace(ch) && ch != b':' {
-                scratch.push(ch);
+                scratch.push(try!(next_or_eof(self)));
             } else {
                 return result(self, scratch);
             }
@@ -835,8 +839,10 @@ impl<'a> SliceRead<'a> {
                     self.index += 1;
                     try!(parse_escape(self, scratch));
                     start = self.index;
+                    was_newline = 0;
                 } else {
                     self.index += 1;
+                    was_newline = 0;
                 }
 
                 b'\n' => if !multiline {
@@ -854,6 +860,7 @@ impl<'a> SliceRead<'a> {
                         return error(self, ErrorCode::InvalidUnicodeCodePoint);
                     }
                     self.index += 1;
+                    was_newline = 0;
                 }
             }
 
@@ -1298,6 +1305,13 @@ static ESCAPE_SINGLE: [bool; 256] = [
 
 fn next_or_eof<'de, R: ?Sized + Read<'de>>(read: &mut R) -> Result<u8> {
     match try!(read.next().map_err(Error::io)) {
+        Some(b) => Ok(b),
+        None => error(read, ErrorCode::EofWhileParsingString),
+    }
+}
+
+fn peek_or_eof<'de, R: ?Sized + Read<'de>>(read: &mut R) -> Result<u8> {
+    match try!(read.peek().map_err(Error::io)) {
         Some(b) => Ok(b),
         None => error(read, ErrorCode::EofWhileParsingString),
     }
