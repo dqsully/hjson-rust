@@ -29,6 +29,18 @@ fn get_result_content(name: &str) -> io::Result<(String,String)> {
     Ok(( try!(get_content(&p1)), try!(get_content(&p2))))
 }
 
+fn get_test_content_file(name: &str) -> io::Result<File> {
+    let mut p = format!("tests/cases/{}_test.hjson", name);
+    if !Path::new(&p).exists() { p = format!("tests/cases/{}_test.json", name); }
+    File::open(Path::new(&p))
+}
+
+// fn get_result_content_file(name: &str) -> io::Result<(String,String)> {
+//     let p1 = format!("tests/cases/{}_result.json", name);
+//     let p2 = format!("tests/cases/{}_result.hjson", name);
+//     Ok(( try!(File::open(Path::new(&p1)), try!(File::open(Path::new(&p2))))
+// }
+
 macro_rules! test {
     ($v: ident) => {
         #[allow(non_snake_case)]
@@ -59,7 +71,31 @@ macro_rules! test {
 
                     panic!();
                 }
-                // TODO later normal json
+            }
+            #[test]
+            fn try_parse_io() {
+                let name = stringify!($v);
+
+                let test_file = get_test_content_file(name).unwrap();
+                let _data: Value = serde_hjson::from_reader(test_file).unwrap();
+            }
+            #[test]
+            fn match_stringify_io() {
+                let name = stringify!($v);
+
+                let test_file = get_test_content_file(name).unwrap();
+                let data: Value = serde_hjson::from_reader(test_file).unwrap();
+
+                let (_, rhjson) = get_result_content(name).unwrap();
+                let actual_hjson = serde_hjson::to_string_pretty(&data).unwrap();
+
+                if rhjson != actual_hjson {
+                    println!("{}", difference::Changeset::new(&rhjson, &actual_hjson, "\n"));
+                    println!("\nExpected:\n{:?}", rhjson);
+                    println!("\nGot:\n{:?}", actual_hjson);
+
+                    panic!();
+                }
             }
         }
     };
@@ -92,7 +128,31 @@ macro_rules! test {
 
                     panic!();
                 }
-                // TODO later normal json
+            }
+            #[test]
+            fn try_parse_io() {
+                let name = stringify!($v);
+
+                let test_file = get_test_content_file(name).unwrap();
+                let _data: Value = serde_hjson::from_reader(test_file).unwrap();
+            }
+            #[test]
+            fn match_stringify_io() {
+                let name = stringify!($v);
+
+                let test_file = get_test_content_file(name).unwrap();
+                let data: Value = serde_hjson::from_reader(&test_file).unwrap();
+
+                let (_, rhjson) = get_result_content(name).unwrap();
+                let actual_hjson = $fix(serde_hjson::to_string_pretty(&data).unwrap());
+
+                if rhjson != actual_hjson {
+                    println!("{}", difference::Changeset::new(&rhjson, &actual_hjson, "\n"));
+                    println!("\nExpected:\n{:?}", rhjson);
+                    println!("\nGot:\n{:?}", actual_hjson);
+
+                    panic!();
+                }
             }
         }
     };
